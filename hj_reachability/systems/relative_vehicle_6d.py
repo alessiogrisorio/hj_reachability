@@ -25,7 +25,7 @@ class RelativeVehicle6D(dynamics.ControlAndDisturbanceAffineDynamics):
         self.lr = lr
         if control_space is None:
             control_space = sets.Box(
-                l0 = jnp.array([
+                lo = jnp.array([
                     -ego_max_steering_rate,
                     ego_min_acceleration,
                 ]),
@@ -56,10 +56,7 @@ class RelativeVehicle6D(dynamics.ControlAndDisturbanceAffineDynamics):
         )
 
         omega_e = (
-            v_e
-            * jnp.cos(beta_e)
-            / (self.lr + self.lf)
-            * jnp.tan(delta_e)
+            v_e * jnp.cos(beta_e) / (self.lr + self.lf) * jnp.tan(delta_e)
         )
 
         return jnp.array([
