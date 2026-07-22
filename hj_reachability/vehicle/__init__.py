@@ -18,6 +18,4 @@ __all__ = [
     "build_terminal_set_boundary",
     "collision_margin_sat",
     "is_collision",
-    "expand_pose_values",
-    "metric_values_to_terminal_values",
 ]
