@@ -9,10 +9,6 @@ from .geometry import (
     collision_margin_sat,
     is_collision,
 )
-from .terminal_conditions import (
-    expand_pose_values,
-    metric_values_to_terminal_values,
-)
 
 __all__ = [
     "DEFAULT_EGO_GEOMETRY",
