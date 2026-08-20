@@ -395,28 +395,13 @@ def simulate(
     """Simulate the closed-loop pursuit-evasion game."""
 
     grid = brt_data["grid"]
+    dynamics = brt_data["dynamics"]
     grid_lo = brt_data["grid_lo"]
     grid_hi = brt_data["grid_hi"]
 
-    def closed_loop_dynamics(
-        time: float,
-        state: np.ndarray,
-    ) -> np.ndarray:
-        """Return the closed-loop state derivative."""
-
-        state_for_interpolation = np.clip(
-            state,
-            grid_lo,
-            grid_hi,
-        )
-
-        game = evaluate_game(
-            brt_data=brt_data,
-            state=state_for_interpolation,
-            time=time,
-        )
-
-        return game["state_dot"]
+    # -----------------------------------------------------------------
+    # Events used inside each integration interval
+    # -----------------------------------------------------------------
 
     def collision_event(
         time: float,
@@ -435,13 +420,16 @@ def simulate(
             jnp.asarray(state_for_interpolation),
         )
 
-        return float(terminal_value)
+        return float(
+            terminal_value
+            - COLLISION_TOLERANCE
+        )
 
     def grid_boundary_event(
         time: float,
         state: np.ndarray,
     ) -> float:
-        """Become zero when the state reaches a grid boundary."""
+        """Become zero when a grid boundary is reached."""
 
         distance_from_lower_boundary = (
             state - grid_lo
@@ -453,8 +441,12 @@ def simulate(
 
         return float(
             min(
-                np.min(distance_from_lower_boundary),
-                np.min(distance_from_upper_boundary),
+                np.min(
+                    distance_from_lower_boundary
+                ),
+                np.min(
+                    distance_from_upper_boundary
+                ),
             )
         )
 
@@ -464,130 +456,62 @@ def simulate(
     grid_boundary_event.terminal = True
     grid_boundary_event.direction = -1
 
-    initial_game = evaluate_game(
-        brt_data=brt_data,
-        state=initial_state,
-        time=0.0,
+    # -----------------------------------------------------------------
+    # Initial conditions and histories
+    # -----------------------------------------------------------------
+
+    time = 0.0
+
+    state = np.asarray(
+        initial_state,
+        dtype=float,
     )
 
-    if initial_game["terminal_value"] <= COLLISION_TOLERANCE:
-        raise ValueError(
-            "The initial state is already inside "
-            "the terminal set."
-        )
-
-    number_of_samples = int(
-        round(
-            MAX_SIMULATION_TIME / DT
-        )
-    ) + 1
-
-    evaluation_times = np.linspace(
-        0.0,
-        MAX_SIMULATION_TIME,
-        number_of_samples,
-    )
-
-    solution = solve_ivp(
-        fun=closed_loop_dynamics,
-        t_span=(
-            0.0,
-            MAX_SIMULATION_TIME,
-        ),
-        y0=initial_state,
-        method="RK45",
-        t_eval=evaluation_times,
-        events=[
-            collision_event,
-            grid_boundary_event,
-        ],
-        max_step=DT,
-        rtol=1e-6,
-        atol=1e-8,
-    )
-
-    if not solution.success:
-        raise RuntimeError(
-            f"Integration failed: {solution.message}"
-        )
-
-    times = solution.t
-    states = solution.y.T
-
-    collision_time = None
-    stop_reason = "maximum simulation time reached"
-
-    if len(solution.t_events[0]) > 0:
-        collision_time = float(
-            solution.t_events[0][0]
-        )
-
-        event_state = solution.y_events[0][0]
-
-        stop_reason = "terminal set reached"
-
-        if not np.isclose(
-            times[-1],
-            collision_time,
-        ):
-            times = np.append(
-                times,
-                collision_time,
-            )
-
-            states = np.vstack(
-                [
-                    states,
-                    event_state,
-                ]
-            )
-
-    elif len(solution.t_events[1]) > 0:
-        grid_exit_time = float(
-            solution.t_events[1][0]
-        )
-
-        event_state = solution.y_events[1][0]
-
-        stop_reason = "grid boundary reached"
-
-        if not np.isclose(
-            times[-1],
-            grid_exit_time,
-        ):
-            times = np.append(
-                times,
-                grid_exit_time,
-            )
-
-            states = np.vstack(
-                [
-                    states,
-                    event_state,
-                ]
-            )
-
+    times = []
+    states = []
     brt_values = []
     terminal_values = []
     hamiltonians = []
     controls = []
     disturbances = []
 
-    for time, state in zip(
-        times,
-        states,
-    ):
-        state_for_interpolation = np.clip(
-            state,
-            grid_lo,
-            grid_hi,
+    collision_time = None
+    stop_reason = "maximum simulation time reached"
+
+    pending_stop_reason = None
+
+    number_of_steps = int(
+        np.ceil(
+            MAX_SIMULATION_TIME / DT
         )
+    )
+
+    # -----------------------------------------------------------------
+    # Sample-and-hold simulation
+    # -----------------------------------------------------------------
+
+    for _ in range(
+        number_of_steps + 1
+    ):
+        if not np.isfinite(state).all():
+            stop_reason = "non-finite state reached"
+            break
+
+        if (
+            np.any(state < grid_lo)
+            or np.any(state > grid_hi)
+        ):
+            stop_reason = "state left grid"
+            break
 
         game = evaluate_game(
             brt_data=brt_data,
-            state=state_for_interpolation,
-            time=float(time),
+            state=state,
+            time=time,
         )
+
+        times.append(time)
+        states.append(state.copy())
 
         brt_values.append(
             game["brt_value"]
@@ -602,26 +526,191 @@ def simulate(
         )
 
         controls.append(
-            game["control"]
+            game["control"].copy()
         )
 
         disturbances.append(
-            game["disturbance"]
+            game["disturbance"].copy()
         )
 
+        # This happens when an event was detected during
+        # the previous integration interval.
+        if pending_stop_reason is not None:
+            stop_reason = pending_stop_reason
+
+            if (
+                pending_stop_reason
+                == "terminal set reached"
+            ):
+                collision_time = time
+
+            break
+
+        if (
+            game["terminal_value"]
+            <= COLLISION_TOLERANCE
+        ):
+            collision_time = time
+            stop_reason = "terminal set reached"
+            break
+
+        if (
+            time
+            >= MAX_SIMULATION_TIME
+            - 1e-12
+        ):
+            stop_reason = (
+                "maximum simulation time reached"
+            )
+            break
+
+        control = game["control"]
+        disturbance = game["disturbance"]
+
+        next_time = min(
+            time + DT,
+            MAX_SIMULATION_TIME,
+        )
+
+        # -------------------------------------------------------------
+        # Dynamics with control and disturbance fixed over [time,next_time]
+        # -------------------------------------------------------------
+
+        def fixed_input_dynamics(
+            local_time: float,
+            local_state: np.ndarray,
+        ) -> np.ndarray:
+            """Evaluate dynamics with fixed inputs."""
+
+            state_jax = jnp.asarray(
+                local_state
+            )
+
+            state_dot = (
+                dynamics.open_loop_dynamics(
+                    state_jax,
+                    local_time,
+                )
+                + dynamics.control_jacobian(
+                    state_jax,
+                    local_time,
+                ) @ jnp.asarray(control)
+                + dynamics.disturbance_jacobian(
+                    state_jax,
+                    local_time,
+                ) @ jnp.asarray(disturbance)
+            )
+
+            return np.asarray(
+                state_dot,
+                dtype=float,
+            )
+
+        interval_solution = solve_ivp(
+            fun=fixed_input_dynamics,
+            t_span=(
+                time,
+                next_time,
+            ),
+            y0=state,
+            method="RK45",
+            events=[
+                collision_event,
+                grid_boundary_event,
+            ],
+            max_step=DT,
+            rtol=1e-6,
+            atol=1e-8,
+        )
+
+        if not interval_solution.success:
+            raise RuntimeError(
+                "Integration failed: "
+                f"{interval_solution.message}"
+            )
+
+        # -------------------------------------------------------------
+        # Check interval events
+        # -------------------------------------------------------------
+
+        if (
+            len(
+                interval_solution.t_events[0]
+            )
+            > 0
+        ):
+            time = float(
+                interval_solution.t_events[0][0]
+            )
+
+            state = np.asarray(
+                interval_solution.y_events[0][0],
+                dtype=float,
+            )
+
+            pending_stop_reason = (
+                "terminal set reached"
+            )
+
+        elif (
+            len(
+                interval_solution.t_events[1]
+            )
+            > 0
+        ):
+            time = float(
+                interval_solution.t_events[1][0]
+            )
+
+            state = np.asarray(
+                interval_solution.y_events[1][0],
+                dtype=float,
+            )
+
+            pending_stop_reason = (
+                "grid boundary reached"
+            )
+
+        else:
+            time = next_time
+
+            state = np.asarray(
+                interval_solution.y[:, -1],
+                dtype=float,
+            )
+
+    # -----------------------------------------------------------------
+    # Convert histories to NumPy arrays
+    # -----------------------------------------------------------------
+
     return {
-        "time": np.asarray(times),
-        "state": np.asarray(states),
-        "brt_value": np.asarray(brt_values),
+        "time": np.asarray(
+            times,
+            dtype=float,
+        ),
+        "state": np.asarray(
+            states,
+            dtype=float,
+        ),
+        "brt_value": np.asarray(
+            brt_values,
+            dtype=float,
+        ),
         "terminal_value": np.asarray(
-            terminal_values
+            terminal_values,
+            dtype=float,
         ),
         "hamiltonian": np.asarray(
-            hamiltonians
+            hamiltonians,
+            dtype=float,
         ),
-        "control": np.asarray(controls),
+        "control": np.asarray(
+            controls,
+            dtype=float,
+        ),
         "disturbance": np.asarray(
-            disturbances
+            disturbances,
+            dtype=float,
         ),
         "collision_time": collision_time,
         "stop_reason": stop_reason,
