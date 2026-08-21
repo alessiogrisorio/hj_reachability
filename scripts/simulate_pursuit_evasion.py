@@ -25,7 +25,7 @@ from hj_reachability.systems.relative_vehicle_6d import RelativeVehicle6D
 # Configuration
 # -----------------------------------------------------------------------------
 BRT_FILENAME = "brt_euclidean_2.npz"
-INITIAL_STATE_MODE = "random_negative"
+INITIAL_STATE_MODE = "random_positive"
 
 MANUAL_INITIAL_STATE = np.array(
     [
@@ -60,7 +60,7 @@ VALUE_CLASSIFICATION_TOLERANCE = 0.05
 SAVE_RESULTS = True
 SAVE_STATIC_FIGURE = True
 SAVE_ANIMATION = True
-SHOW_STATIC_FIGURE = True
+SHOW_STATIC_FIGURE = False
 SHOW_ANIMATION_WINDOW = False
 ANIMATION_FRAME_STRIDE = 5
 ANIMATION_FPS = 20
