@@ -716,6 +716,505 @@ def simulate(
         "stop_reason": stop_reason,
     }
 
+
+def save_simulation_results(
+    result: dict,
+    initial_state: np.ndarray,
+    brt_path: Path,
+) -> Path:
+    """Save simulation histories and configuration to an NPZ file."""
+
+    save_directory = project_root / "results" / "simulations"
+
+    save_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    timestamp = datetime.now().strftime(
+        "%Y%m%d_%H%M%S"
+    )
+
+    save_path = (
+        save_directory
+        / f"pursuit_evasion_{timestamp}.npz"
+    )
+
+    simulation_metadata = {
+        "created_at": (
+            datetime.now()
+            .astimezone()
+            .isoformat()
+        ),
+        "source_brt_file": brt_path.name,
+        "initial_state_mode": INITIAL_STATE_MODE,
+        "initial_state": initial_state.tolist(),
+        "dt": DT,
+        "maximum_simulation_time": (
+            MAX_SIMULATION_TIME
+        ),
+        "brt_horizon": BRT_HORIZON,
+        "collision_tolerance": (
+            COLLISION_TOLERANCE
+        ),
+        "stop_reason": result["stop_reason"],
+        "collision_time": (
+            None
+            if result["collision_time"] is None
+            else float(result["collision_time"])
+        ),
+        "state_names": list(STATE_NAMES),
+        "control_names": list(CONTROL_NAMES),
+        "disturbance_names": list(
+            DISTURBANCE_NAMES
+        ),
+    }
+
+    metadata_json = json.dumps(
+        simulation_metadata,
+        indent=4,
+    )
+
+    np.savez_compressed(
+        save_path,
+        time=result["time"],
+        state=result["state"],
+        brt_value=result["brt_value"],
+        terminal_value=result["terminal_value"],
+        hamiltonian=result["hamiltonian"],
+        control=result["control"],
+        disturbance=result["disturbance"],
+        ego_x=result["ego_x"],
+        ego_y=result["ego_y"],
+        ego_heading=result["ego_heading"],
+        human_x=result["human_x"],
+        human_y=result["human_y"],
+        human_heading=result["human_heading"],
+        initial_state=np.asarray(
+            initial_state,
+            dtype=float,
+        ),
+        collision_time=np.asarray(
+            np.nan
+            if result["collision_time"] is None
+            else result["collision_time"],
+            dtype=float,
+        ),
+        stop_reason=np.asarray(
+            result["stop_reason"]
+        ),
+        metadata_json=np.asarray(
+            metadata_json
+        ),
+    )
+
+    return save_path
+
+
+def create_static_figure(
+    result: dict,
+) -> tuple[plt.Figure, Path | None]:
+    """Create the vertically aligned simulation plots."""
+
+    time = result["time"]
+    state = result["state"]
+    control = result["control"]
+    disturbance = result["disturbance"]
+
+    figure, axes = plt.subplots(
+        nrows=7,
+        ncols=1,
+        figsize=(12, 22),
+        sharex=True,
+        constrained_layout=True,
+    )
+
+    # -----------------------------------------------------------------
+    # 1. Value functions
+    # -----------------------------------------------------------------
+
+    axes[0].plot(
+        time,
+        result["brt_value"],
+        label=r"$V(-3, x(t))$",
+        color="tab:blue",
+        linewidth=2.0,
+    )
+
+    axes[0].plot(
+        time,
+        result["terminal_value"],
+        label=r"$V_0(x(t))$",
+        color="tab:orange",
+        linewidth=1.8,
+    )
+
+    axes[0].axhline(
+        0.0,
+        color="black",
+        linestyle="--",
+        linewidth=1.0,
+    )
+
+    axes[0].set_ylabel("Value")
+    axes[0].set_title(
+        "Pursuit-evasion simulation"
+    )
+    axes[0].legend()
+    axes[0].grid(True)
+
+    # -----------------------------------------------------------------
+    # 2. Hamiltonian
+    # -----------------------------------------------------------------
+
+    axes[1].plot(
+        time,
+        result["hamiltonian"],
+        color="tab:purple",
+        linewidth=2.0,
+    )
+
+    axes[1].axhline(
+        0.0,
+        color="black",
+        linestyle="--",
+        linewidth=1.0,
+    )
+
+    axes[1].set_ylabel("Hamiltonian")
+    axes[1].grid(True)
+
+    # -----------------------------------------------------------------
+    # 3. Ego controls
+    # -----------------------------------------------------------------
+
+    axes[2].plot(
+        time,
+        np.rad2deg(control[:, 0]),
+        label="steering rate [deg/s]",
+        color="tab:green",
+        linewidth=1.8,
+    )
+
+    axes[2].plot(
+        time,
+        control[:, 1],
+        label="acceleration [m/s²]",
+        color="tab:red",
+        linewidth=1.8,
+    )
+
+    axes[2].set_ylabel("Ego control")
+    axes[2].legend()
+    axes[2].grid(True)
+
+    # -----------------------------------------------------------------
+    # 4. Human disturbances
+    # -----------------------------------------------------------------
+
+    axes[3].plot(
+        time,
+        np.rad2deg(disturbance[:, 0]),
+        label="yaw rate [deg/s]",
+        color="tab:brown",
+        linewidth=1.8,
+    )
+
+    axes[3].plot(
+        time,
+        disturbance[:, 1],
+        label="acceleration [m/s²]",
+        color="tab:pink",
+        linewidth=1.8,
+    )
+
+    axes[3].set_ylabel("Human input")
+    axes[3].legend()
+    axes[3].grid(True)
+
+    # -----------------------------------------------------------------
+    # 5. Relative position
+    # -----------------------------------------------------------------
+
+    axes[4].plot(
+        time,
+        state[:, 0],
+        label=r"$x_{rel}$",
+        linewidth=1.8,
+    )
+
+    axes[4].plot(
+        time,
+        state[:, 1],
+        label=r"$y_{rel}$",
+        linewidth=1.8,
+    )
+
+    axes[4].set_ylabel("Position [m]")
+    axes[4].legend()
+    axes[4].grid(True)
+
+    # -----------------------------------------------------------------
+    # 6. Relative angles
+    # -----------------------------------------------------------------
+
+    axes[5].plot(
+        time,
+        np.rad2deg(state[:, 2]),
+        label=r"$\theta_{rel}$",
+        linewidth=1.8,
+    )
+
+    axes[5].plot(
+        time,
+        np.rad2deg(state[:, 4]),
+        label=r"$\delta_E$",
+        linewidth=1.8,
+    )
+
+    axes[5].set_ylabel("Angle [deg]")
+    axes[5].legend()
+    axes[5].grid(True)
+
+    # -----------------------------------------------------------------
+    # 7. Vehicle speeds
+    # -----------------------------------------------------------------
+
+    axes[6].plot(
+        time,
+        state[:, 3],
+        label=r"$v_H$",
+        linewidth=1.8,
+    )
+
+    axes[6].plot(
+        time,
+        state[:, 5],
+        label=r"$v_E$",
+        linewidth=1.8,
+    )
+
+    axes[6].set_ylabel("Speed [m/s]")
+    axes[6].set_xlabel("Simulation time [s]")
+    axes[6].legend()
+    axes[6].grid(True)
+
+    # -----------------------------------------------------------------
+    # Common temporal markers
+    # -----------------------------------------------------------------
+
+    for axis in axes:
+        axis.axvline(
+            BRT_HORIZON,
+            color="gray",
+            linestyle=":",
+            linewidth=1.3,
+            label="_nolegend_",
+        )
+
+    collision_time = result["collision_time"]
+
+    if collision_time is not None:
+        for axis in axes:
+            axis.axvline(
+                collision_time,
+                color="red",
+                linestyle="--",
+                linewidth=1.5,
+                label="_nolegend_",
+            )
+
+    # -----------------------------------------------------------------
+    # Optional saving
+    # -----------------------------------------------------------------
+
+    figure_path = None
+
+    if SAVE_STATIC_FIGURE:
+        figure_directory = (
+            project_root
+            / "results"
+            / "figures"
+        )
+
+        figure_directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        timestamp = datetime.now().strftime(
+            "%Y%m%d_%H%M%S"
+        )
+
+        figure_path = (
+            figure_directory
+            / f"pursuit_evasion_{timestamp}.png"
+        )
+
+        figure.savefig(
+            figure_path,
+            dpi=200,
+            bbox_inches="tight",
+        )
+
+    return figure, figure_path
+
+def reconstruct_absolute_trajectories(
+    result: dict,
+    brt_data: dict,
+) -> dict:
+    """Reconstruct ego and human poses in an absolute frame."""
+
+    time = result["time"]
+    state = result["state"]
+
+    dynamics = brt_data["dynamics"]
+
+    number_of_samples = len(time)
+
+    ego_x = np.zeros(
+        number_of_samples,
+        dtype=float,
+    )
+
+    ego_y = np.zeros(
+        number_of_samples,
+        dtype=float,
+    )
+
+    ego_heading = np.zeros(
+        number_of_samples,
+        dtype=float,
+    )
+
+    # -----------------------------------------------------------------
+    # Ego absolute trajectory
+    # -----------------------------------------------------------------
+
+    delta_e = state[:, 4]
+    v_e = state[:, 5]
+
+    beta_e = np.arctan(
+        dynamics.lr
+        / (dynamics.lr + dynamics.lf)
+        * np.tan(delta_e)
+    )
+
+    ego_yaw_rate = (
+        v_e
+        * np.cos(beta_e)
+        / (dynamics.lr + dynamics.lf)
+        * np.tan(delta_e)
+    )
+
+    for index in range(
+        number_of_samples - 1
+    ):
+        local_dt = (
+            time[index + 1]
+            - time[index]
+        )
+
+        # The velocity direction is psi_E + beta_E.
+        velocity_angle_now = (
+            ego_heading[index]
+            + beta_e[index]
+        )
+
+        # First estimate of the next ego heading.
+        next_heading = (
+            ego_heading[index]
+            + 0.5
+            * local_dt
+            * (
+                ego_yaw_rate[index]
+                + ego_yaw_rate[index + 1]
+            )
+        )
+
+        velocity_angle_next = (
+            next_heading
+            + beta_e[index + 1]
+        )
+
+        # Trapezoidal integration of the ego position.
+        ego_x[index + 1] = (
+            ego_x[index]
+            + 0.5
+            * local_dt
+            * (
+                v_e[index]
+                * np.cos(
+                    velocity_angle_now
+                )
+                + v_e[index + 1]
+                * np.cos(
+                    velocity_angle_next
+                )
+            )
+        )
+
+        ego_y[index + 1] = (
+            ego_y[index]
+            + 0.5
+            * local_dt
+            * (
+                v_e[index]
+                * np.sin(
+                    velocity_angle_now
+                )
+                + v_e[index + 1]
+                * np.sin(
+                    velocity_angle_next
+                )
+            )
+        )
+
+        ego_heading[index + 1] = (
+            next_heading
+        )
+
+    # -----------------------------------------------------------------
+    # Human absolute trajectory
+    # -----------------------------------------------------------------
+
+    x_rel = state[:, 0]
+    y_rel = state[:, 1]
+    theta_rel = state[:, 2]
+
+    cos_ego_heading = np.cos(
+        ego_heading
+    )
+
+    sin_ego_heading = np.sin(
+        ego_heading
+    )
+
+    human_x = (
+        ego_x
+        + cos_ego_heading * x_rel
+        - sin_ego_heading * y_rel
+    )
+
+    human_y = (
+        ego_y
+        + sin_ego_heading * x_rel
+        + cos_ego_heading * y_rel
+    )
+
+    human_heading = (
+        ego_heading
+        + theta_rel
+    )
+
+    return {
+        "ego_x": ego_x,
+        "ego_y": ego_y,
+        "ego_heading": ego_heading,
+        "human_x": human_x,
+        "human_y": human_y,
+        "human_heading": human_heading,
+    }
 # -----------------------------------------------------------------------------
 # main
 # -----------------------------------------------------------------------------
@@ -738,6 +1237,43 @@ if __name__ == "__main__":
         brt_data=brt_data,
         initial_state=initial_state,
     )
+
+    absolute_trajectories = (
+        reconstruct_absolute_trajectories(
+            result=result,
+            brt_data=brt_data,
+        )
+    )
+
+    result.update(
+        absolute_trajectories
+    )
+
+    simulation_save_path = None
+
+    if SAVE_RESULTS:
+        simulation_save_path = (
+            save_simulation_results(
+                result=result,
+                initial_state=initial_state,
+                brt_path=brt_path,
+            )
+        )
+
+    static_figure = None
+    static_figure_path = None
+
+    if (
+        SAVE_STATIC_FIGURE
+        or SHOW_STATIC_FIGURE
+    ):
+        (
+            static_figure,
+            static_figure_path,
+        ) = create_static_figure(
+            result=result,
+        )
+    
 
     print("Simulation finished")
     print("Stop reason:", result["stop_reason"])
@@ -776,6 +1312,23 @@ if __name__ == "__main__":
         "Final state:",
         result["state"][-1],
     )
+
+    if simulation_save_path is not None:
+        print(
+            "Simulation data saved in:",
+            simulation_save_path.resolve(),
+        )
+
+    if static_figure_path is not None:
+        print(
+            "Static figure saved in:",
+            static_figure_path.resolve(),
+        )
+
+    if SHOW_STATIC_FIGURE:
+        plt.show()
+    elif static_figure is not None:
+        plt.close(static_figure)
 
 # -----------------------------------------------------------------------------
 # Local functions II
