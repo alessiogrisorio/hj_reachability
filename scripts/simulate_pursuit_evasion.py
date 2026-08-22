@@ -25,7 +25,7 @@ from hj_reachability.systems.relative_vehicle_6d import RelativeVehicle6D
 # Configuration
 # -----------------------------------------------------------------------------
 BRT_FILENAME = "brt_euclidean_2.npz"
-INITIAL_STATE_MODE = "random_positive"
+INITIAL_STATE_MODE = "random_negative"
 
 MANUAL_INITIAL_STATE = np.array(
     [
@@ -62,8 +62,10 @@ SAVE_STATIC_FIGURE = True
 SAVE_ANIMATION = True
 SHOW_STATIC_FIGURE = False
 SHOW_ANIMATION_WINDOW = False
-ANIMATION_FRAME_STRIDE = 5
+ANIMATION_FORMAT = "mp4"
+ANIMATION_FRAME_STRIDE = 1
 ANIMATION_FPS = 20
+ANIMATION_DPI = 120
 
 # Simple vehicle dimensions used only in the relative-frame animation.
 EGO_LENGTH = 4.68
@@ -1215,6 +1217,916 @@ def reconstruct_absolute_trajectories(
         "human_y": human_y,
         "human_heading": human_heading,
     }
+
+
+def vehicle_polygon(
+    x: float,
+    y: float,
+    heading: float,
+    length: float,
+    width: float,
+) -> np.ndarray:
+    """Return the absolute coordinates of a vehicle rectangle."""
+
+    half_length = 0.5 * length
+    half_width = 0.5 * width
+
+    body_vertices = np.array(
+        [
+            [half_length, half_width],
+            [half_length, -half_width],
+            [-half_length, -half_width],
+            [-half_length, half_width],
+        ],
+        dtype=float,
+    )
+
+    rotation_matrix = np.array(
+        [
+            [
+                np.cos(heading),
+                -np.sin(heading),
+            ],
+            [
+                np.sin(heading),
+                np.cos(heading),
+            ],
+        ],
+        dtype=float,
+    )
+
+    absolute_vertices = (
+        body_vertices
+        @ rotation_matrix.T
+    )
+
+    absolute_vertices[:, 0] += x
+    absolute_vertices[:, 1] += y
+
+    return absolute_vertices
+
+
+def create_animation(
+    result: dict,
+) -> tuple[
+    plt.Figure,
+    animation.FuncAnimation,
+    Path | None,
+]:
+    """Create and optionally save the pursuit-evasion animation."""
+
+    time = result["time"]
+    state = result["state"]
+    control = result["control"]
+    disturbance = result["disturbance"]
+
+    ego_x = result["ego_x"]
+    ego_y = result["ego_y"]
+    ego_heading = result["ego_heading"]
+
+    human_x = result["human_x"]
+    human_y = result["human_y"]
+    human_heading = result["human_heading"]
+
+    # -----------------------------------------------------------------
+    # Animation frames
+    # -----------------------------------------------------------------
+
+    frame_indices = np.arange(
+        0,
+        len(time),
+        ANIMATION_FRAME_STRIDE,
+        dtype=int,
+    )
+
+    # Always include the final simulation sample.
+    if frame_indices[-1] != len(time) - 1:
+        frame_indices = np.append(
+            frame_indices,
+            len(time) - 1,
+        )
+
+    # -----------------------------------------------------------------
+    # Figure layout
+    # -----------------------------------------------------------------
+
+    figure = plt.figure(
+        figsize=(16, 11),
+        constrained_layout=True,
+    )
+
+    grid_specification = figure.add_gridspec(
+        nrows=7,
+        ncols=2,
+        width_ratios=(1.3, 1.0),
+    )
+
+    vehicle_axis = figure.add_subplot(
+        grid_specification[:, 0]
+    )
+
+    value_axis = figure.add_subplot(
+        grid_specification[0, 1]
+    )
+
+    hamiltonian_axis = figure.add_subplot(
+        grid_specification[1, 1],
+        sharex=value_axis,
+    )
+
+    control_axis = figure.add_subplot(
+        grid_specification[2, 1],
+        sharex=value_axis,
+    )
+
+    disturbance_axis = figure.add_subplot(
+        grid_specification[3, 1],
+        sharex=value_axis,
+    )
+
+    position_axis = figure.add_subplot(
+        grid_specification[4, 1],
+        sharex=value_axis,
+    )
+
+    angle_axis = figure.add_subplot(
+        grid_specification[5, 1],
+        sharex=value_axis,
+    )
+
+    speed_axis = figure.add_subplot(
+        grid_specification[6, 1],
+        sharex=value_axis,
+    )
+
+    signal_axes = (
+        value_axis,
+        hamiltonian_axis,
+        control_axis,
+        disturbance_axis,
+        position_axis,
+        angle_axis,
+        speed_axis,
+    )
+
+    # -----------------------------------------------------------------
+    # Vehicle panel
+    # -----------------------------------------------------------------
+
+    all_x = np.concatenate(
+        [
+            ego_x,
+            human_x,
+        ]
+    )
+
+    all_y = np.concatenate(
+        [
+            ego_y,
+            human_y,
+        ]
+    )
+
+    vehicle_margin = max(
+        EGO_LENGTH,
+        HUMAN_LENGTH,
+    )
+
+    vehicle_axis.set_xlim(
+        np.min(all_x) - vehicle_margin,
+        np.max(all_x) + vehicle_margin,
+    )
+
+    vehicle_axis.set_ylim(
+        np.min(all_y) - vehicle_margin,
+        np.max(all_y) + vehicle_margin,
+    )
+
+    vehicle_axis.set_aspect(
+        "equal",
+        adjustable="box",
+    )
+
+    vehicle_axis.set_xlabel(
+        "Absolute x [m]"
+    )
+
+    vehicle_axis.set_ylabel(
+        "Absolute y [m]"
+    )
+
+    vehicle_axis.set_title(
+        "Absolute vehicle trajectories"
+    )
+
+    vehicle_axis.grid(True)
+
+    ego_trajectory_line, = (
+        vehicle_axis.plot(
+            [],
+            [],
+            color="tab:blue",
+            linewidth=2.0,
+            label="Ego trajectory",
+        )
+    )
+
+    human_trajectory_line, = (
+        vehicle_axis.plot(
+            [],
+            [],
+            color="tab:red",
+            linewidth=2.0,
+            label="Human trajectory",
+        )
+    )
+
+    ego_polygon = Polygon(
+        vehicle_polygon(
+            x=ego_x[0],
+            y=ego_y[0],
+            heading=ego_heading[0],
+            length=EGO_LENGTH,
+            width=EGO_WIDTH,
+        ),
+        closed=True,
+        facecolor="tab:blue",
+        edgecolor="black",
+        alpha=0.75,
+        label="Ego",
+    )
+
+    human_polygon = Polygon(
+        vehicle_polygon(
+            x=human_x[0],
+            y=human_y[0],
+            heading=human_heading[0],
+            length=HUMAN_LENGTH,
+            width=HUMAN_WIDTH,
+        ),
+        closed=True,
+        facecolor="tab:red",
+        edgecolor="black",
+        alpha=0.75,
+        label="Human",
+    )
+
+    vehicle_axis.add_patch(
+        ego_polygon
+    )
+
+    vehicle_axis.add_patch(
+        human_polygon
+    )
+
+    information_text = vehicle_axis.text(
+        0.02,
+        0.98,
+        "",
+        transform=vehicle_axis.transAxes,
+        verticalalignment="top",
+        horizontalalignment="left",
+        fontfamily="monospace",
+        fontsize=10,
+        bbox={
+            "facecolor": "white",
+            "alpha": 0.85,
+            "edgecolor": "gray",
+        },
+    )
+
+    vehicle_axis.legend(
+        loc="lower right"
+    )
+
+    # -----------------------------------------------------------------
+    # Complete signal curves in the background
+    # -----------------------------------------------------------------
+
+    ego_steering_rate_deg = np.rad2deg(
+        control[:, 0]
+    )
+
+    human_yaw_rate_deg = np.rad2deg(
+        disturbance[:, 0]
+    )
+
+    theta_rel_deg = np.rad2deg(
+        state[:, 2]
+    )
+
+    delta_e_deg = np.rad2deg(
+        state[:, 4]
+    )
+
+    value_axis.plot(
+        time,
+        result["brt_value"],
+        color="tab:blue",
+        alpha=0.20,
+        linewidth=1.0,
+    )
+
+    value_axis.plot(
+        time,
+        result["terminal_value"],
+        color="tab:orange",
+        alpha=0.20,
+        linewidth=1.0,
+    )
+
+    hamiltonian_axis.plot(
+        time,
+        result["hamiltonian"],
+        color="tab:purple",
+        alpha=0.20,
+        linewidth=1.0,
+    )
+
+    control_axis.plot(
+        time,
+        ego_steering_rate_deg,
+        color="tab:green",
+        alpha=0.20,
+        linewidth=1.0,
+    )
+
+    control_axis.plot(
+        time,
+        control[:, 1],
+        color="tab:red",
+        alpha=0.20,
+        linewidth=1.0,
+    )
+
+    disturbance_axis.plot(
+        time,
+        human_yaw_rate_deg,
+        color="tab:brown",
+        alpha=0.20,
+        linewidth=1.0,
+    )
+
+    disturbance_axis.plot(
+        time,
+        disturbance[:, 1],
+        color="tab:pink",
+        alpha=0.20,
+        linewidth=1.0,
+    )
+
+    position_axis.plot(
+        time,
+        state[:, 0],
+        color="tab:blue",
+        alpha=0.20,
+        linewidth=1.0,
+    )
+
+    position_axis.plot(
+        time,
+        state[:, 1],
+        color="tab:orange",
+        alpha=0.20,
+        linewidth=1.0,
+    )
+
+    angle_axis.plot(
+        time,
+        theta_rel_deg,
+        color="tab:green",
+        alpha=0.20,
+        linewidth=1.0,
+    )
+
+    angle_axis.plot(
+        time,
+        delta_e_deg,
+        color="tab:red",
+        alpha=0.20,
+        linewidth=1.0,
+    )
+
+    speed_axis.plot(
+        time,
+        state[:, 3],
+        color="tab:blue",
+        alpha=0.20,
+        linewidth=1.0,
+    )
+
+    speed_axis.plot(
+        time,
+        state[:, 5],
+        color="tab:orange",
+        alpha=0.20,
+        linewidth=1.0,
+    )
+
+    # -----------------------------------------------------------------
+    # Progressive signal curves
+    # -----------------------------------------------------------------
+
+    brt_line, = value_axis.plot(
+        [],
+        [],
+        color="tab:blue",
+        linewidth=2.0,
+        label=r"$V(-3,x(t))$",
+    )
+
+    terminal_line, = value_axis.plot(
+        [],
+        [],
+        color="tab:orange",
+        linewidth=2.0,
+        label=r"$V_0(x(t))$",
+    )
+
+    hamiltonian_line, = (
+        hamiltonian_axis.plot(
+            [],
+            [],
+            color="tab:purple",
+            linewidth=2.0,
+            label="Hamiltonian",
+        )
+    )
+
+    ego_steering_line, = (
+        control_axis.plot(
+            [],
+            [],
+            color="tab:green",
+            linewidth=2.0,
+            label="steering rate [deg/s]",
+        )
+    )
+
+    ego_acceleration_line, = (
+        control_axis.plot(
+            [],
+            [],
+            color="tab:red",
+            linewidth=2.0,
+            label="acceleration [m/s²]",
+        )
+    )
+
+    human_yaw_line, = (
+        disturbance_axis.plot(
+            [],
+            [],
+            color="tab:brown",
+            linewidth=2.0,
+            label="yaw rate [deg/s]",
+        )
+    )
+
+    human_acceleration_line, = (
+        disturbance_axis.plot(
+            [],
+            [],
+            color="tab:pink",
+            linewidth=2.0,
+            label="acceleration [m/s²]",
+        )
+    )
+
+    x_rel_line, = position_axis.plot(
+        [],
+        [],
+        color="tab:blue",
+        linewidth=2.0,
+        label=r"$x_{rel}$",
+    )
+
+    y_rel_line, = position_axis.plot(
+        [],
+        [],
+        color="tab:orange",
+        linewidth=2.0,
+        label=r"$y_{rel}$",
+    )
+
+    theta_rel_line, = angle_axis.plot(
+        [],
+        [],
+        color="tab:green",
+        linewidth=2.0,
+        label=r"$\theta_{rel}$",
+    )
+
+    delta_e_line, = angle_axis.plot(
+        [],
+        [],
+        color="tab:red",
+        linewidth=2.0,
+        label=r"$\delta_E$",
+    )
+
+    human_speed_line, = speed_axis.plot(
+        [],
+        [],
+        color="tab:blue",
+        linewidth=2.0,
+        label=r"$v_H$",
+    )
+
+    ego_speed_line, = speed_axis.plot(
+        [],
+        [],
+        color="tab:orange",
+        linewidth=2.0,
+        label=r"$v_E$",
+    )
+
+    # -----------------------------------------------------------------
+    # Signal-axis formatting
+    # -----------------------------------------------------------------
+
+    value_axis.axhline(
+        0.0,
+        color="black",
+        linestyle="--",
+        linewidth=0.9,
+    )
+
+    hamiltonian_axis.axhline(
+        0.0,
+        color="black",
+        linestyle="--",
+        linewidth=0.9,
+    )
+
+    value_axis.set_ylabel("Value")
+    hamiltonian_axis.set_ylabel("H")
+    control_axis.set_ylabel("Ego input")
+    disturbance_axis.set_ylabel("Human input")
+    position_axis.set_ylabel("Position [m]")
+    angle_axis.set_ylabel("Angle [deg]")
+    speed_axis.set_ylabel("Speed [m/s]")
+    speed_axis.set_xlabel("Simulation time [s]")
+
+    value_axis.legend(
+        loc="upper right",
+        fontsize=8,
+    )
+
+    hamiltonian_axis.legend(
+        loc="upper right",
+        fontsize=8,
+    )
+
+    control_axis.legend(
+        loc="upper right",
+        fontsize=8,
+    )
+
+    disturbance_axis.legend(
+        loc="upper right",
+        fontsize=8,
+    )
+
+    position_axis.legend(
+        loc="upper right",
+        fontsize=8,
+    )
+
+    angle_axis.legend(
+        loc="upper right",
+        fontsize=8,
+    )
+
+    speed_axis.legend(
+        loc="upper right",
+        fontsize=8,
+    )
+
+    maximum_plot_time = max(
+        float(time[-1]),
+        DT,
+    )
+
+    for axis in signal_axes:
+        axis.set_xlim(
+            0.0,
+            maximum_plot_time,
+        )
+
+        axis.grid(True)
+
+        axis.axvline(
+            BRT_HORIZON,
+            color="gray",
+            linestyle=":",
+            linewidth=1.0,
+        )
+
+    # -----------------------------------------------------------------
+    # Moving time indicators
+    # -----------------------------------------------------------------
+
+    time_indicators = [
+        axis.axvline(
+            time[0],
+            color="black",
+            linewidth=1.2,
+        )
+        for axis in signal_axes
+    ]
+
+    progressive_lines = (
+        brt_line,
+        terminal_line,
+        hamiltonian_line,
+        ego_steering_line,
+        ego_acceleration_line,
+        human_yaw_line,
+        human_acceleration_line,
+        x_rel_line,
+        y_rel_line,
+        theta_rel_line,
+        delta_e_line,
+        human_speed_line,
+        ego_speed_line,
+    )
+
+    # -----------------------------------------------------------------
+    # Frame update
+    # -----------------------------------------------------------------
+
+    def update_frame(
+        frame_number: int,
+    ) -> tuple:
+        """Update all artists for one animation frame."""
+
+        data_index = int(
+            frame_indices[frame_number]
+        )
+
+        current_slice = slice(
+            0,
+            data_index + 1,
+        )
+
+        current_time = float(
+            time[data_index]
+        )
+
+        ego_trajectory_line.set_data(
+            ego_x[current_slice],
+            ego_y[current_slice],
+        )
+
+        human_trajectory_line.set_data(
+            human_x[current_slice],
+            human_y[current_slice],
+        )
+
+        ego_polygon.set_xy(
+            vehicle_polygon(
+                x=ego_x[data_index],
+                y=ego_y[data_index],
+                heading=ego_heading[data_index],
+                length=EGO_LENGTH,
+                width=EGO_WIDTH,
+            )
+        )
+
+        human_polygon.set_xy(
+            vehicle_polygon(
+                x=human_x[data_index],
+                y=human_y[data_index],
+                heading=human_heading[data_index],
+                length=HUMAN_LENGTH,
+                width=HUMAN_WIDTH,
+            )
+        )
+
+        brt_line.set_data(
+            time[current_slice],
+            result["brt_value"][
+                current_slice
+            ],
+        )
+
+        terminal_line.set_data(
+            time[current_slice],
+            result["terminal_value"][
+                current_slice
+            ],
+        )
+
+        hamiltonian_line.set_data(
+            time[current_slice],
+            result["hamiltonian"][
+                current_slice
+            ],
+        )
+
+        ego_steering_line.set_data(
+            time[current_slice],
+            ego_steering_rate_deg[
+                current_slice
+            ],
+        )
+
+        ego_acceleration_line.set_data(
+            time[current_slice],
+            control[current_slice, 1],
+        )
+
+        human_yaw_line.set_data(
+            time[current_slice],
+            human_yaw_rate_deg[
+                current_slice
+            ],
+        )
+
+        human_acceleration_line.set_data(
+            time[current_slice],
+            disturbance[
+                current_slice,
+                1,
+            ],
+        )
+
+        x_rel_line.set_data(
+            time[current_slice],
+            state[current_slice, 0],
+        )
+
+        y_rel_line.set_data(
+            time[current_slice],
+            state[current_slice, 1],
+        )
+
+        theta_rel_line.set_data(
+            time[current_slice],
+            theta_rel_deg[
+                current_slice
+            ],
+        )
+
+        delta_e_line.set_data(
+            time[current_slice],
+            delta_e_deg[
+                current_slice
+            ],
+        )
+
+        human_speed_line.set_data(
+            time[current_slice],
+            state[current_slice, 3],
+        )
+
+        ego_speed_line.set_data(
+            time[current_slice],
+            state[current_slice, 5],
+        )
+
+        for time_indicator in time_indicators:
+            time_indicator.set_xdata(
+                [
+                    current_time,
+                    current_time,
+                ]
+            )
+
+        status_text = ""
+
+        if data_index == len(time) - 1:
+            status_text = (
+                f"\nstop: "
+                f"{result['stop_reason']}"
+            )
+
+        information_text.set_text(
+            f"t = {current_time:6.2f} s\n"
+            f"V = "
+            f"{result['brt_value'][data_index]: .4f}\n"
+            f"V0 = "
+            f"{result['terminal_value'][data_index]: .4f}\n"
+            f"H = "
+            f"{result['hamiltonian'][data_index]: .4f}"
+            f"{status_text}"
+        )
+
+        return (
+            ego_trajectory_line,
+            human_trajectory_line,
+            ego_polygon,
+            human_polygon,
+            information_text,
+            *progressive_lines,
+            *time_indicators,
+        )
+
+    # -----------------------------------------------------------------
+    # Create animation
+    # -----------------------------------------------------------------
+
+    simulation_animation = (
+        animation.FuncAnimation(
+            figure,
+            update_frame,
+            frames=len(frame_indices),
+            interval=(
+                1000.0
+                / ANIMATION_FPS
+            ),
+            repeat=False,
+            blit=False,
+        )
+    )
+
+    # Draw the initial frame immediately.
+    update_frame(0)
+
+    # -----------------------------------------------------------------
+    # Optional saving
+    # -----------------------------------------------------------------
+
+    animation_path = None
+
+    if SAVE_ANIMATION:
+        animation_directory = (
+            project_root
+            / "results"
+            / "animations"
+        )
+
+        animation_directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        timestamp = datetime.now().strftime(
+            "%Y%m%d_%H%M%S"
+        )
+
+        if ANIMATION_FORMAT == "mp4":
+            if not animation.writers.is_available(
+                "ffmpeg"
+            ):
+                raise RuntimeError(
+                    "Matplotlib cannot find ffmpeg. "
+                    "Install ffmpeg or set "
+                    "ANIMATION_FORMAT = 'gif'."
+                )
+
+            animation_path = (
+                animation_directory
+                / f"pursuit_evasion_{timestamp}.mp4"
+            )
+
+            video_writer = (
+                animation.FFMpegWriter(
+                    fps=ANIMATION_FPS,
+                    codec="libx264",
+                    extra_args=[
+                        "-pix_fmt",
+                        "yuv420p",
+                    ],
+                )
+            )
+
+            simulation_animation.save(
+                animation_path,
+                writer=video_writer,
+                dpi=ANIMATION_DPI,
+            )
+
+        elif ANIMATION_FORMAT == "gif":
+            animation_path = (
+                animation_directory
+                / f"pursuit_evasion_{timestamp}.gif"
+            )
+
+            gif_writer = (
+                animation.PillowWriter(
+                    fps=ANIMATION_FPS,
+                )
+            )
+
+            simulation_animation.save(
+                animation_path,
+                writer=gif_writer,
+                dpi=ANIMATION_DPI,
+            )
+
+        else:
+            raise ValueError(
+                "ANIMATION_FORMAT must be "
+                "'mp4' or 'gif'."
+            )
+
+    return (
+        figure,
+        simulation_animation,
+        animation_path,
+    )
 # -----------------------------------------------------------------------------
 # main
 # -----------------------------------------------------------------------------
@@ -1273,7 +2185,30 @@ if __name__ == "__main__":
         ) = create_static_figure(
             result=result,
         )
-    
+
+    animation_figure = None
+    simulation_animation = None
+    animation_path = None
+
+    if (
+        SAVE_ANIMATION
+        or SHOW_ANIMATION_WINDOW
+    ):
+        print(
+            "Creating animation..."
+        )
+
+        (
+            animation_figure,
+            simulation_animation,
+            animation_path,
+        ) = create_animation(
+            result=result,
+        )
+
+        print(
+            "Animation completed."
+        )
 
     print("Simulation finished")
     print("Stop reason:", result["stop_reason"])
@@ -1325,23 +2260,26 @@ if __name__ == "__main__":
             static_figure_path.resolve(),
         )
 
-    if SHOW_STATIC_FIGURE:
+    if animation_path is not None:
+        print(
+            "Animation saved in:",
+            animation_path.resolve(),
+        )
+
+    if (
+        SHOW_STATIC_FIGURE
+        or SHOW_ANIMATION_WINDOW
+    ):
         plt.show()
-    elif static_figure is not None:
-        plt.close(static_figure)
 
-# -----------------------------------------------------------------------------
-# Local functions II
-# -----------------------------------------------------------------------------
+    else:
+        if static_figure is not None:
+            plt.close(
+                static_figure
+            )
 
-# -----------------------------------------------------------------------------
-# Local functions II
-# -----------------------------------------------------------------------------
+        if animation_figure is not None:
+            plt.close(
+                animation_figure
+            )
 
-# -----------------------------------------------------------------------------
-# Local functions II
-# -----------------------------------------------------------------------------
-
-# -----------------------------------------------------------------------------
-# Local functions II
-# -----------------------------------------------------------------------------
