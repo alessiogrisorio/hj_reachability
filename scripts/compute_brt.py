@@ -34,7 +34,7 @@ STATE_NAMES = (
 INITIAL_TIME = 0.0
 TARGET_TIME = -3.0
 
-SOLVER_ACCURACY = "low"
+SOLVER_ACCURACY = "high"
 
 TERMINAL_SET_N_THETA = 90
 TERMINAL_SET_N_PHI = 180
@@ -79,6 +79,14 @@ DYNAMICS_PARAMETERS = {
     "control_mode": "max",
     "disturbance_mode": "min",
 }
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+OUTPUT_PATH = (
+    PROJECT_ROOT
+    / "results"
+    / "brt"
+    / "euclidean.npz"
+)
 
 #---- Local functions ----#
 def build_grid() -> hj.Grid:
@@ -335,20 +343,12 @@ if __name__ == "__main__":
         indent=4,
     )
 
-    save_directory = project_root / "results"
-    save_directory.mkdir(
+    OUTPUT_PATH.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    timestamp = datetime.now().strftime(
-        "%Y%m%d_%H%M%S"
-    )
-
-    save_path = (
-        save_directory
-        / f"brt_euclidean_nonperiodic_{timestamp}.npz"
-    )
+    save_path = OUTPUT_PATH
 
     np.savez_compressed(
         save_path,
