@@ -129,4 +129,4 @@ dmypy.json
 .pyre/
 
 # escludere il brt
-results/*.npz
+results/brt/*.npz
