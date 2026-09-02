@@ -279,7 +279,10 @@ if __name__ == "__main__":
     # 3. Terminal value function
     # -----------------------------------------------------------------
 
-    print("\n[3/6] Computing terminal value function V0 " f"using metric '{METRIC_NAME}'...")
+    print(
+        "\n[3/6] Computing terminal value function V0 "
+        f"using metric '{METRIC_NAME}'..."
+    )
 
     metric_result = compute_terminal_metric(
         grid=grid,
