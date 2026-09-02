@@ -57,8 +57,8 @@ METRIC_PARAMETERS = {
         "max_bisection_iterations": 60,
     },
     "dce": {
-        "horizon": 3.0,
-        "dt": 0.01,
+        "horizon": 1.0,
+        "dt": 0.05,
         "collision_tolerance": 1e-10,
         "batch_size": 100_000,
         "n_theta": 90,
