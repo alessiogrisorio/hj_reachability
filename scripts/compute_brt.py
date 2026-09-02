@@ -18,7 +18,10 @@ import hj_reachability as hj
 
 from hj_reachability.systems.relative_vehicle_6d import RelativeVehicle6D
 from hj_reachability.vehicle.geometry import build_terminal_set_boundary
-from hj_reachability.vehicle.metrics import metricEuclidean
+from hj_reachability.vehicle.metrics import (
+    metricEuclidean,
+    metricTTC,
+)
 
 #---- Configuration ----#
 
@@ -36,8 +39,23 @@ TARGET_TIME = -3.0
 
 SOLVER_ACCURACY = "high"
 
-TERMINAL_SET_N_THETA = 90
-TERMINAL_SET_N_PHI = 180
+# Scelta della metrica
+# euclidean, ttc
+METRIC_NAME = "ttc"
+
+METRIC_PARAMETERS = {
+    "euclidean": {
+        "n_theta": 90,
+        "n_phi": 180,
+    },
+    "ttc": {
+        "horizon": 3.0,
+        "dt": 0.01,
+        "collision_tolerance": 1e-10,
+        "batch_size": 100_000,
+        "max_bisection_iterations": 60,
+    },
+}
 
 GRID_LO = np.array(
     [
@@ -85,10 +103,58 @@ OUTPUT_PATH = (
     PROJECT_ROOT
     / "results"
     / "brt"
-    / "euclidean.npz"
+    / f"{METRIC_NAME}.npz"
 )
 
 #---- Local functions ----#
+def compute_terminal_metric(
+    grid: hj.Grid,
+    dynamics: RelativeVehicle6D,
+):
+    """Compute the selected terminal metric."""
+
+    if METRIC_NAME not in METRIC_PARAMETERS:
+        raise ValueError(
+            f"Unknown metric: {METRIC_NAME}. "
+            f"Available metrics: "
+            f"{tuple(METRIC_PARAMETERS.keys())}"
+        )
+
+    parameters = METRIC_PARAMETERS[METRIC_NAME]
+
+    if METRIC_NAME == "euclidean":
+        boundary = build_terminal_set_boundary(
+            n_theta=parameters["n_theta"],
+            n_phi=parameters["n_phi"],
+        )
+
+        return metricEuclidean(
+            grid=grid,
+            boundary=boundary,
+        )
+
+    if METRIC_NAME == "ttc":
+        return metricTTC(
+            grid=grid,
+            dynamics=dynamics,
+            horizon=parameters["horizon"],
+            dt=parameters["dt"],
+            collision_tolerance=(
+                parameters["collision_tolerance"]
+            ),
+            batch_size=parameters["batch_size"],
+            max_bisection_iterations=(
+                parameters[
+                    "max_bisection_iterations"
+                ]
+            ),
+        )
+
+    raise RuntimeError(
+        f"Metric configuration not implemented: "
+        f"{METRIC_NAME}"
+    )
+
 def build_grid() -> hj.Grid:
     """Build the non-periodic 6D grid."""
 
@@ -152,10 +218,9 @@ def create_metadata(
             "periodic_dims": list(PERIODIC_DIMS),
             "total_points": int(np.prod(GRID_SHAPE)),
         },
-        "terminal_set": {
-            "metric": "metricEuclidean",
-            "n_theta": TERMINAL_SET_N_THETA,
-            "n_phi": TERMINAL_SET_N_PHI,
+        "metric": {
+            "name": METRIC_NAME,
+            "parameters": METRIC_PARAMETERS[METRIC_NAME],
         },
         "dynamics": {
             "class": type(dynamics).__name__,
@@ -198,25 +263,27 @@ if __name__ == "__main__":
     print_grid_information(grid)
 
     # -----------------------------------------------------------------
-    # 2. Terminal-set boundary
+    # 2. Dynamics
     # -----------------------------------------------------------------
 
-    print("\n[2/6] Building terminal-set boundary...")
+    print("\n[2/6] Building dynamics...")
 
-    boundary = build_terminal_set_boundary(
-        n_theta=TERMINAL_SET_N_THETA,
-        n_phi=TERMINAL_SET_N_PHI,
+    dynamics = RelativeVehicle6D(
+        **DYNAMICS_PARAMETERS,
     )
+
+    print(f"Dynamics: {type(dynamics).__name__}")
+    print(f"Dynamics parameters: {DYNAMICS_PARAMETERS}")
 
     # -----------------------------------------------------------------
     # 3. Terminal value function
     # -----------------------------------------------------------------
 
-    print("\n[3/6] Computing terminal value function V0...")
+    print("\n[3/6] Computing terminal value function V0 " f"using metric '{METRIC_NAME}'...")
 
-    metric_result = metricEuclidean(
+    metric_result = compute_terminal_metric(
         grid=grid,
-        boundary=boundary,
+        dynamics=dynamics,
     )
 
     V0 = metric_result.terminal_values
@@ -227,10 +294,26 @@ if __name__ == "__main__":
         f"[{float(jnp.min(V0)):.6f}, "
         f"{float(jnp.max(V0)):.6f}]"
     )
-    print(
-        "Angular scale: "
-        f"{float(metric_result.angular_scale):.6f} m/rad"
-    )
+    if METRIC_NAME == "euclidean":
+        print(
+            "Angular scale: "
+            f"{float(metric_result.angular_scale):.6f} "
+            "m/rad"
+        )
+
+    if METRIC_NAME == "ttc":
+        print(
+            "TTC horizon: "
+            f"{metric_result.horizon:.6f} s"
+        )
+        print(
+            "TTC time step: "
+            f"{metric_result.dt:.6f} s"
+        )
+        print(
+            "No-collision value: "
+            f"{metric_result.no_collision_value:.6f} s"
+        )
 
     if tuple(V0.shape) != tuple(grid.shape):
         raise ValueError(
@@ -239,14 +322,9 @@ if __name__ == "__main__":
         )
 
     # -----------------------------------------------------------------
-    # 4. Dynamics and solver
+    # 4. Solver
     # -----------------------------------------------------------------
-
-    print("\n[4/6] Building dynamics and solver settings...")
-
-    dynamics = RelativeVehicle6D(
-        **DYNAMICS_PARAMETERS,
-    )
+    print("\n[4/6] Building solver settings...")
 
     solver_settings = hj.SolverSettings.with_accuracy(
         SOLVER_ACCURACY,
@@ -255,8 +333,6 @@ if __name__ == "__main__":
         ),
     )
 
-    print(f"Dynamics: {type(dynamics).__name__}")
-    print(f"Dynamics parameters: {DYNAMICS_PARAMETERS}")
     print(f"Solver accuracy: {SOLVER_ACCURACY}")
 
     # -----------------------------------------------------------------
@@ -374,6 +450,7 @@ if __name__ == "__main__":
         initial_time=np.float32(INITIAL_TIME),
         target_time=np.float32(TARGET_TIME),
         state_names=np.asarray(STATE_NAMES),
+        metric_name=np.asarray(METRIC_NAME),
         metadata_json=np.asarray(metadata_json),
     )
 
