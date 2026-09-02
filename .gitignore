@@ -128,5 +128,5 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# escludere il brt
-results/brt/*.npz
+# escludere i risultati
+results/
