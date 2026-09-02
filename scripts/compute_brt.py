@@ -21,6 +21,7 @@ from hj_reachability.vehicle.geometry import build_terminal_set_boundary
 from hj_reachability.vehicle.metrics import (
     metricEuclidean,
     metricTTC,
+    metricDCE,
 )
 
 #---- Configuration ----#
@@ -40,8 +41,8 @@ TARGET_TIME = -3.0
 SOLVER_ACCURACY = "high"
 
 # Scelta della metrica
-# euclidean, ttc
-METRIC_NAME = "ttc"
+# euclidean, ttc, dce
+METRIC_NAME = "dce"
 
 METRIC_PARAMETERS = {
     "euclidean": {
@@ -55,6 +56,14 @@ METRIC_PARAMETERS = {
         "batch_size": 100_000,
         "max_bisection_iterations": 60,
     },
+    "dce": {
+        "horizon": 3.0,
+        "dt": 0.01,
+        "collision_tolerance": 1e-10,
+        "batch_size": 100_000,
+        "n_theta": 90,
+        "n_phi": 180,
+    }
 }
 
 GRID_LO = np.array(
@@ -148,6 +157,24 @@ def compute_terminal_metric(
                     "max_bisection_iterations"
                 ]
             ),
+        )
+
+    if METRIC_NAME == "dce":
+        boundary = build_terminal_set_boundary(
+            n_theta=parameters["n_theta"],
+            n_phi=parameters["n_phi"],
+        )
+
+        return metricDCE(
+            grid=grid,
+            dynamics=dynamics,
+            boundary=boundary,
+            horizon=parameters["horizon"],
+            dt=parameters["dt"],
+            collision_tolerance=(
+                parameters["collision_tolerance"]
+            ),
+            batch_size=parameters["batch_size"],
         )
 
     raise RuntimeError(
@@ -297,7 +324,10 @@ if __name__ == "__main__":
         f"[{float(jnp.min(V0)):.6f}, "
         f"{float(jnp.max(V0)):.6f}]"
     )
-    if METRIC_NAME == "euclidean":
+    if METRIC_NAME in {
+        "euclidean",
+        "dce",
+    }:
         print(
             "Angular scale: "
             f"{float(metric_result.angular_scale):.6f} "
@@ -316,6 +346,21 @@ if __name__ == "__main__":
         print(
             "No-collision value: "
             f"{metric_result.no_collision_value:.6f} s"
+        )
+
+    if METRIC_NAME == "dce":
+        print(
+            "DCE horizon: "
+            f"{metric_result.horizon:.6f} s"
+        )
+        print(
+            "DCE time step: "
+            f"{metric_result.dt:.6f} s"
+        )
+        print(
+            "TCE range: "
+            f"[{float(jnp.min(metric_result.tce)):.6f}, "
+            f"{float(jnp.max(metric_result.tce)):.6f}] s"
         )
 
     if tuple(V0.shape) != tuple(grid.shape):
@@ -406,6 +451,16 @@ if __name__ == "__main__":
         dtype=np.float32,
     )
 
+    additional_metric_arrays = {}
+
+    if METRIC_NAME == "dce":
+        additional_metric_arrays["TCE"] = (
+            np.asarray(
+                metric_result.tce,
+                dtype=np.float32,
+            )
+        )
+
     coordinate_vectors = [
         np.asarray(vector, dtype=np.float32)
         for vector in grid.coordinate_vectors
@@ -416,6 +471,13 @@ if __name__ == "__main__":
         brt=BRT_save,
         gradients=gradients_save,
     )
+
+    if METRIC_NAME == "dce":
+        metadata["arrays"]["TCE_shape"] = list(
+            additional_metric_arrays[
+                "TCE"
+            ].shape
+        )
 
     metadata_json = json.dumps(
         metadata,
@@ -455,6 +517,7 @@ if __name__ == "__main__":
         state_names=np.asarray(STATE_NAMES),
         metric_name=np.asarray(METRIC_NAME),
         metadata_json=np.asarray(metadata_json),
+        **additional_metric_arrays,
     )
 
     print("\n" + "=" * 70)
