@@ -89,7 +89,7 @@ def metricTTC(
 
     shape = tuple(axis.size for axis in axes)
     n_points = int(np.prod(shape))
-    no_collision_value = 2.0 * horizon
+    no_collision_value = horizon
     values_flat = np.empty(n_points, dtype=float)
 
     for first in range(0, n_points, batch_size):
