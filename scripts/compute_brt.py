@@ -38,11 +38,11 @@ STATE_NAMES = (
 INITIAL_TIME = 0.0
 TARGET_TIME = -3.0
 
-SOLVER_ACCURACY = "high"
+SOLVER_ACCURACY = "very_high"
 
 # Scelta della metrica
 # euclidean, ttc, dce
-METRIC_NAME = "dce"
+METRIC_NAME = "ttc"
 
 METRIC_PARAMETERS = {
     "euclidean": {
@@ -68,8 +68,8 @@ METRIC_PARAMETERS = {
 
 GRID_LO = np.array(
     [
+        -12.0,
         -8.0,
-        -6.0,
         -np.pi / 4,
         1.0,
         -np.pi / 12,
@@ -81,7 +81,7 @@ GRID_LO = np.array(
 GRID_HI = np.array(
     [
         17.0,
-        6.0,
+        8.0,
         np.pi / 4,
         11.0,
         np.pi / 12,
@@ -90,7 +90,7 @@ GRID_HI = np.array(
     dtype=np.float32,
 )
 
-GRID_SHAPE = (26, 13, 15, 8, 21, 8)
+GRID_SHAPE = (30, 17, 15, 8, 21, 8)
 PERIODIC_DIMS: tuple[int, ...] = ()
 
 #---- Dynamics ----#
