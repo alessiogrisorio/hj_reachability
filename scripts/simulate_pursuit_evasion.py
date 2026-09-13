@@ -91,6 +91,11 @@ RECOVERY_GLOBAL_STEERING_SAMPLES = 9
 RECOVERY_GLOBAL_ACCELERATION_SAMPLES = 9
 RECOVERY_REFINED_STEERING_SAMPLES = 9
 RECOVERY_REFINED_ACCELERATION_SAMPLES = 9
+RECOVERY_GLOBAL_YAW_RATE_SAMPLES = 9
+RECOVERY_GLOBAL_HUMAN_ACCELERATION_SAMPLES = 9
+RECOVERY_REFINED_YAW_RATE_SAMPLES = 9
+RECOVERY_REFINED_HUMAN_ACCELERATION_SAMPLES = 9
+RECOVERY_COORDINATE_ITERATIONS = 3
 RECOVERY_SHADE_ALPHA = 0.14
 
 # Simple vehicle dimensions used only in the relative-frame animation.
@@ -635,19 +640,18 @@ def normalized_unconfined_margins(
     ) / widths
 
 
-def recovery_control(
+def recovery_inputs(
     brt_data: dict,
     state: np.ndarray,
     time: float,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """
-    Select the ego command that best returns all unconfined states
-    toward the grid interior.
+    Cooperatively select ego and human inputs that return the relative
+    state to the inner grid region as quickly as possible.
 
-    A global command grid is evaluated first. A second, finer grid is
-    then centered on the best global command. Candidates are ranked
-    lexicographically: worst final margin, mean final margin, worst
-    margin over the rollout, and finally lower control effort.
+    The search alternates between ego and human. Each agent performs a
+    global grid search followed by a local refinement around its best
+    input. This coordinate search is repeated a few times.
     """
 
     dynamics = brt_data["dynamics"]
@@ -658,14 +662,16 @@ def recovery_control(
         dynamics.control_space.lo,
         dtype=float,
     )
-
     control_hi = np.asarray(
         dynamics.control_space.hi,
         dtype=float,
     )
-
-    human_straight = np.zeros(
-        2,
+    disturbance_lo = np.asarray(
+        dynamics.disturbance_space.lo,
+        dtype=float,
+    )
+    disturbance_hi = np.asarray(
+        dynamics.disturbance_space.hi,
         dtype=float,
     )
 
@@ -674,10 +680,18 @@ def recovery_control(
         / RECOVERY_PREDICTION_STEPS
     )
 
-    def evaluate_candidate(
+    def evaluate_pair(
         candidate_control: np.ndarray,
-    ) -> tuple[float, float, float, float]:
-        """Return the lexicographic recovery score of one command."""
+        candidate_disturbance: np.ndarray,
+    ) -> tuple[
+        int,
+        float,
+        float,
+        float,
+        float,
+        float,
+    ]:
+        """Return a lexicographic score for one cooperative input pair."""
 
         predicted_state = np.asarray(
             state,
@@ -685,6 +699,7 @@ def recovery_control(
         ).copy()
 
         minimum_rollout_margin = np.inf
+        first_return_time = None
 
         for rollout_index in range(
             RECOVERY_PREDICTION_STEPS
@@ -693,11 +708,16 @@ def recovery_control(
                 enforce_controlled_state_bounds(
                     state=predicted_state,
                     control=candidate_control,
-                    disturbance=human_straight,
+                    disturbance=candidate_disturbance,
                     grid_lo=grid_lo,
                     grid_hi=grid_hi,
                     step_duration=rollout_dt,
                 )
+            )
+
+            local_time = (
+                time
+                + rollout_index * rollout_dt
             )
 
             predicted_state_jax = jnp.asarray(
@@ -707,18 +727,15 @@ def recovery_control(
             predicted_state_dot = (
                 dynamics.open_loop_dynamics(
                     predicted_state_jax,
-                    time
-                    + rollout_index * rollout_dt,
+                    local_time,
                 )
                 + dynamics.control_jacobian(
                     predicted_state_jax,
-                    time
-                    + rollout_index * rollout_dt,
+                    local_time,
                 ) @ jnp.asarray(bounded_control)
                 + dynamics.disturbance_jacobian(
                     predicted_state_jax,
-                    time
-                    + rollout_index * rollout_dt,
+                    local_time,
                 ) @ jnp.asarray(bounded_disturbance)
             )
 
@@ -751,6 +768,18 @@ def recovery_control(
                 rollout_margin,
             )
 
+            if (
+                first_return_time is None
+                and can_exit_recovery(
+                    brt_data,
+                    predicted_state,
+                )
+            ):
+                first_return_time = (
+                    (rollout_index + 1)
+                    * rollout_dt
+                )
+
         final_margins = (
             normalized_unconfined_margins(
                 brt_data,
@@ -758,160 +787,235 @@ def recovery_control(
             )
         )
 
-        normalized_effort = float(
-            np.mean(
-                (
-                    2.0
-                    * (candidate_control - control_lo)
-                    / (control_hi - control_lo)
-                    - 1.0
-                ) ** 2
-            )
+        normalized_control_effort = np.mean(
+            (
+                2.0
+                * (candidate_control - control_lo)
+                / (control_hi - control_lo)
+                - 1.0
+            ) ** 2
         )
 
+        normalized_disturbance_effort = np.mean(
+            (
+                2.0
+                * (
+                    candidate_disturbance
+                    - disturbance_lo
+                )
+                / (
+                    disturbance_hi
+                    - disturbance_lo
+                )
+                - 1.0
+            ) ** 2
+        )
+
+        returned = first_return_time is not None
+
         return (
+            int(returned),
+            (
+                -float(first_return_time)
+                if returned
+                else -np.inf
+            ),
             float(np.min(final_margins)),
             float(np.mean(final_margins)),
             float(minimum_rollout_margin),
-            -normalized_effort,
+            -float(
+                normalized_control_effort
+                + normalized_disturbance_effort
+            ),
         )
 
-    def search_command_grid(
-        steering_candidates: np.ndarray,
-        acceleration_candidates: np.ndarray,
-        current_best_control: np.ndarray | None = None,
-        current_best_score: tuple[
-            float,
-            float,
-            float,
-            float,
-        ] | None = None,
-    ) -> tuple[
-        np.ndarray,
-        tuple[float, float, float, float],
-    ]:
-        """Evaluate a rectangular command grid."""
+    def search_ego(
+        fixed_disturbance: np.ndarray,
+    ) -> np.ndarray:
+        """Globally search and then refine the ego input."""
 
-        best_control = current_best_control
-        best_score = current_best_score
+        global_first = np.linspace(
+            control_lo[0],
+            control_hi[0],
+            RECOVERY_GLOBAL_STEERING_SAMPLES,
+        )
+        global_second = np.linspace(
+            control_lo[1],
+            control_hi[1],
+            RECOVERY_GLOBAL_ACCELERATION_SAMPLES,
+        )
 
-        for steering_rate in steering_candidates:
-            for acceleration in acceleration_candidates:
-                candidate_control = np.array(
-                    [
-                        steering_rate,
-                        acceleration,
-                    ],
+        best_input = None
+        best_score = None
+
+        for first_value in global_first:
+            for second_value in global_second:
+                candidate = np.array(
+                    [first_value, second_value],
                     dtype=float,
                 )
-
-                score = evaluate_candidate(
-                    candidate_control
+                score = evaluate_pair(
+                    candidate,
+                    fixed_disturbance,
                 )
-
-                if (
-                    best_score is None
-                    or score > best_score
-                ):
+                if best_score is None or score > best_score:
+                    best_input = candidate
                     best_score = score
-                    best_control = candidate_control
 
-        if best_control is None or best_score is None:
-            raise RuntimeError(
-                "The recovery command search produced no candidate."
-            )
+        first_step = (
+            control_hi[0] - control_lo[0]
+        ) / (RECOVERY_GLOBAL_STEERING_SAMPLES - 1)
+        second_step = (
+            control_hi[1] - control_lo[1]
+        ) / (RECOVERY_GLOBAL_ACCELERATION_SAMPLES - 1)
 
-        return best_control, best_score
+        refined_first = np.linspace(
+            max(control_lo[0], best_input[0] - first_step),
+            min(control_hi[0], best_input[0] + first_step),
+            RECOVERY_REFINED_STEERING_SAMPLES,
+        )
+        refined_second = np.linspace(
+            max(control_lo[1], best_input[1] - second_step),
+            min(control_hi[1], best_input[1] + second_step),
+            RECOVERY_REFINED_ACCELERATION_SAMPLES,
+        )
 
-    global_steering_candidates = np.linspace(
-        control_lo[0],
-        control_hi[0],
-        RECOVERY_GLOBAL_STEERING_SAMPLES,
+        for first_value in refined_first:
+            for second_value in refined_second:
+                candidate = np.array(
+                    [first_value, second_value],
+                    dtype=float,
+                )
+                score = evaluate_pair(
+                    candidate,
+                    fixed_disturbance,
+                )
+                if score > best_score:
+                    best_input = candidate
+                    best_score = score
+
+        return best_input
+
+    def search_human(
+        fixed_control: np.ndarray,
+    ) -> np.ndarray:
+        """Globally search and then refine the human input."""
+
+        global_first = np.linspace(
+            disturbance_lo[0],
+            disturbance_hi[0],
+            RECOVERY_GLOBAL_YAW_RATE_SAMPLES,
+        )
+        global_second = np.linspace(
+            disturbance_lo[1],
+            disturbance_hi[1],
+            RECOVERY_GLOBAL_HUMAN_ACCELERATION_SAMPLES,
+        )
+
+        best_input = None
+        best_score = None
+
+        for first_value in global_first:
+            for second_value in global_second:
+                candidate = np.array(
+                    [first_value, second_value],
+                    dtype=float,
+                )
+                score = evaluate_pair(
+                    fixed_control,
+                    candidate,
+                )
+                if best_score is None or score > best_score:
+                    best_input = candidate
+                    best_score = score
+
+        first_step = (
+            disturbance_hi[0] - disturbance_lo[0]
+        ) / (RECOVERY_GLOBAL_YAW_RATE_SAMPLES - 1)
+        second_step = (
+            disturbance_hi[1] - disturbance_lo[1]
+        ) / (
+            RECOVERY_GLOBAL_HUMAN_ACCELERATION_SAMPLES
+            - 1
+        )
+
+        refined_first = np.linspace(
+            max(
+                disturbance_lo[0],
+                best_input[0] - first_step,
+            ),
+            min(
+                disturbance_hi[0],
+                best_input[0] + first_step,
+            ),
+            RECOVERY_REFINED_YAW_RATE_SAMPLES,
+        )
+        refined_second = np.linspace(
+            max(
+                disturbance_lo[1],
+                best_input[1] - second_step,
+            ),
+            min(
+                disturbance_hi[1],
+                best_input[1] + second_step,
+            ),
+            RECOVERY_REFINED_HUMAN_ACCELERATION_SAMPLES,
+        )
+
+        for first_value in refined_first:
+            for second_value in refined_second:
+                candidate = np.array(
+                    [first_value, second_value],
+                    dtype=float,
+                )
+                score = evaluate_pair(
+                    fixed_control,
+                    candidate,
+                )
+                if score > best_score:
+                    best_input = candidate
+                    best_score = score
+
+        return best_input
+
+    control = np.zeros(2, dtype=float)
+    disturbance = np.zeros(2, dtype=float)
+
+    for _ in range(RECOVERY_COORDINATE_ITERATIONS):
+        control = search_ego(
+            fixed_disturbance=disturbance,
+        )
+        disturbance = search_human(
+            fixed_control=control,
+        )
+
+    control, disturbance = (
+        enforce_controlled_state_bounds(
+            state=state,
+            control=control,
+            disturbance=disturbance,
+            grid_lo=grid_lo,
+            grid_hi=grid_hi,
+            step_duration=DT,
+        )
     )
 
-    global_acceleration_candidates = np.linspace(
-        control_lo[1],
-        control_hi[1],
-        RECOVERY_GLOBAL_ACCELERATION_SAMPLES,
-    )
+    return control, disturbance
 
-    best_control, best_score = search_command_grid(
-        steering_candidates=global_steering_candidates,
-        acceleration_candidates=(
-            global_acceleration_candidates
-        ),
-    )
-
-    steering_step = (
-        control_hi[0] - control_lo[0]
-    ) / (RECOVERY_GLOBAL_STEERING_SAMPLES - 1)
-
-    acceleration_step = (
-        control_hi[1] - control_lo[1]
-    ) / (RECOVERY_GLOBAL_ACCELERATION_SAMPLES - 1)
-
-    refined_steering_candidates = np.linspace(
-        max(
-            control_lo[0],
-            best_control[0] - steering_step,
-        ),
-        min(
-            control_hi[0],
-            best_control[0] + steering_step,
-        ),
-        RECOVERY_REFINED_STEERING_SAMPLES,
-    )
-
-    refined_acceleration_candidates = np.linspace(
-        max(
-            control_lo[1],
-            best_control[1] - acceleration_step,
-        ),
-        min(
-            control_hi[1],
-            best_control[1] + acceleration_step,
-        ),
-        RECOVERY_REFINED_ACCELERATION_SAMPLES,
-    )
-
-    best_control, _ = search_command_grid(
-        steering_candidates=refined_steering_candidates,
-        acceleration_candidates=(
-            refined_acceleration_candidates
-        ),
-        current_best_control=best_control,
-        current_best_score=best_score,
-    )
-
-    bounded_control, _ = enforce_controlled_state_bounds(
-        state=state,
-        control=best_control,
-        disturbance=human_straight,
-        grid_lo=grid_lo,
-        grid_hi=grid_hi,
-        step_duration=DT,
-    )
-
-    return bounded_control
 
 def evaluate_recovery(
     brt_data: dict,
     state: np.ndarray,
     time: float,
 ) -> dict:
-    """Evaluate the physical dynamics while the HJ feedback is suspended."""
+    """Evaluate cooperative dynamics while HJ feedback is suspended."""
 
     dynamics = brt_data["dynamics"]
 
-    control = recovery_control(
+    control, disturbance = recovery_inputs(
         brt_data=brt_data,
         state=state,
         time=time,
-    )
-
-    disturbance = np.zeros(
-        2,
-        dtype=float,
     )
 
     state_jax = jnp.asarray(state)
