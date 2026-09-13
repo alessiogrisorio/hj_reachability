@@ -20,6 +20,7 @@ if str(project_root) not in sys.path:
 import hj_reachability as hj
 
 from hj_reachability.systems.relative_vehicle_6d import RelativeVehicle6D
+from hj_reachability.vehicle.geometry import collision_margin_sat
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -51,7 +52,7 @@ MAX_RANDOM_SELECTION_ATTEMPTS = 200_000
 
 # Simulation and validation horizons.
 BRT_HORIZON = 3.0
-MAX_SIMULATION_TIME = 7.0
+MAX_SIMULATION_TIME = 3.0
 DT = 0.05
 COLLISION_TOLERANCE = 0.0
 VALUE_CLASSIFICATION_TOLERANCE = 0.05
@@ -66,6 +67,17 @@ ANIMATION_FORMAT = "mp4"
 ANIMATION_FRAME_STRIDE = 1
 ANIMATION_FPS = 20
 ANIMATION_DPI = 120
+
+# Continue after V0 <= 0 and after a geometrical collision.
+STOP_ON_TERMINAL_VALUE = False
+STOP_ON_PHYSICAL_COLLISION = False
+
+# Keep velocity and steering states inside their grid ranges.
+ENFORCE_CONTROLLED_STATE_BOUNDS = True
+
+# For random modes, reject trajectories that leave the spatial/angular grid.
+REQUIRE_FULL_HORIZON_INSIDE_GRID = True
+MAX_FULL_HORIZON_ATTEMPTS = 200
 
 # Simple vehicle dimensions used only in the relative-frame animation.
 EGO_LENGTH = 4.68
@@ -189,15 +201,107 @@ def load_saved_brt(brt_path: Path) -> dict:
 # -----------------------------------------------------------------------------
 # Local functions II
 # -----------------------------------------------------------------------------
+def enforce_controlled_state_bounds(
+    state: np.ndarray,
+    control: np.ndarray,
+    disturbance: np.ndarray,
+    grid_lo: np.ndarray,
+    grid_hi: np.ndarray,
+    step_duration: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Restrict the inputs so that v_H, delta_E and v_E cannot
+    leave their grid intervals during the next sample-and-hold step.
+    """
+
+    corrected_control = np.asarray(
+        control,
+        dtype=float,
+    ).copy()
+
+    corrected_disturbance = np.asarray(
+        disturbance,
+        dtype=float,
+    ).copy()
+
+    if not ENFORCE_CONTROLLED_STATE_BOUNDS:
+        return corrected_control, corrected_disturbance
+
+    if step_duration <= 0.0:
+        return corrected_control, corrected_disturbance
+
+    # -------------------------------------------------------------
+    # Human velocity:
+    # v_H_dot = disturbance[1]
+    # -------------------------------------------------------------
+
+    minimum_human_acceleration = (
+        grid_lo[3] - state[3]
+    ) / step_duration
+
+    maximum_human_acceleration = (
+        grid_hi[3] - state[3]
+    ) / step_duration
+
+    corrected_disturbance[1] = np.clip(
+        corrected_disturbance[1],
+        minimum_human_acceleration,
+        maximum_human_acceleration,
+    )
+
+    # -------------------------------------------------------------
+    # Ego steering angle:
+    # delta_E_dot = control[0]
+    # -------------------------------------------------------------
+
+    minimum_steering_rate = (
+        grid_lo[4] - state[4]
+    ) / step_duration
+
+    maximum_steering_rate = (
+        grid_hi[4] - state[4]
+    ) / step_duration
+
+    corrected_control[0] = np.clip(
+        corrected_control[0],
+        minimum_steering_rate,
+        maximum_steering_rate,
+    )
+
+    # -------------------------------------------------------------
+    # Ego velocity:
+    # v_E_dot = control[1]
+    # -------------------------------------------------------------
+
+    minimum_ego_acceleration = (
+        grid_lo[5] - state[5]
+    ) / step_duration
+
+    maximum_ego_acceleration = (
+        grid_hi[5] - state[5]
+    ) / step_duration
+
+    corrected_control[1] = np.clip(
+        corrected_control[1],
+        minimum_ego_acceleration,
+        maximum_ego_acceleration,
+    )
+
+    return corrected_control, corrected_disturbance
+
+
 def evaluate_game(
     brt_data: dict,
     state: np.ndarray,
     time: float,
+    step_duration: float = DT,
 ) -> dict:
     """Evaluate the BRT feedback game at one state."""
 
     grid = brt_data["grid"]
     dynamics = brt_data["dynamics"]
+    grid_lo = brt_data["grid_lo"]
+    grid_hi = brt_data["grid_hi"]
 
     state_jax = jnp.asarray(state)
 
@@ -216,13 +320,33 @@ def evaluate_game(
         state_jax,
     )
 
-    control, disturbance = (
+    optimal_control, optimal_disturbance = (
         dynamics.optimal_control_and_disturbance(
             state_jax,
             time,
             gradient,
         )
     )
+
+    control, disturbance = (
+        enforce_controlled_state_bounds(
+            state=state,
+            control=np.asarray(
+                optimal_control,
+                dtype=float,
+            ),
+            disturbance=np.asarray(
+                optimal_disturbance,
+                dtype=float,
+            ),
+            grid_lo=grid_lo,
+            grid_hi=grid_hi,
+            step_duration=step_duration,
+        )
+    )
+
+    control_jax = jnp.asarray(control)
+    disturbance_jax = jnp.asarray(disturbance)
 
     state_dot = (
         dynamics.open_loop_dynamics(
@@ -232,11 +356,11 @@ def evaluate_game(
         + dynamics.control_jacobian(
             state_jax,
             time,
-        ) @ control
+        ) @ control_jax
         + dynamics.disturbance_jacobian(
             state_jax,
             time,
-        ) @ disturbance
+        ) @ disturbance_jax
     )
 
     hamiltonian = jnp.dot(
@@ -244,13 +368,29 @@ def evaluate_game(
         state_dot,
     )
 
+    physical_collision_margin = float(
+        collision_margin_sat(
+            state[0],
+            state[1],
+            state[2],
+        )
+    )
+
     return {
         "brt_value": float(brt_value),
         "terminal_value": float(terminal_value),
-        "gradient": np.asarray(gradient, dtype=float),
-        "control": np.asarray(control, dtype=float),
-        "disturbance": np.asarray(
-            disturbance,
+        "gradient": np.asarray(
+            gradient,
+            dtype=float,
+        ),
+        "control": control,
+        "disturbance": disturbance,
+        "unconstrained_control": np.asarray(
+            optimal_control,
+            dtype=float,
+        ),
+        "unconstrained_disturbance": np.asarray(
+            optimal_disturbance,
             dtype=float,
         ),
         "state_dot": np.asarray(
@@ -258,6 +398,7 @@ def evaluate_game(
             dtype=float,
         ),
         "hamiltonian": float(hamiltonian),
+        "collision_margin": physical_collision_margin,
     }
 
 
@@ -266,6 +407,7 @@ def evaluate_game(
 # -----------------------------------------------------------------------------
 def select_initial_state(
     brt_data: dict,
+    rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     """Select the initial state according to INITIAL_STATE_MODE."""
 
@@ -307,9 +449,10 @@ def select_initial_state(
             f"{INITIAL_STATE_MODE}"
         )
 
-    rng = np.random.default_rng(
-        RANDOM_SEED
-    )
+    if rng is None:
+        rng = np.random.default_rng(
+            RANDOM_SEED
+        )
 
     BRT = np.asarray(
         brt_data["BRT"]
@@ -396,67 +539,76 @@ def simulate(
 ) -> dict:
     """Simulate the closed-loop pursuit-evasion game."""
 
-    grid = brt_data["grid"]
     dynamics = brt_data["dynamics"]
     grid_lo = brt_data["grid_lo"]
     grid_hi = brt_data["grid_hi"]
 
+    # Only x_rel, y_rel and theta_rel are not directly confined
+    # through acceleration or steering-rate bounds.
+    unconfined_dimensions = np.array(
+        [0, 1, 2],
+        dtype=int,
+    )
+
     # -----------------------------------------------------------------
-    # Events used inside each integration interval
+    # Events
     # -----------------------------------------------------------------
 
-    def collision_event(
-        time: float,
-        state: np.ndarray,
+    def physical_collision_event(
+        local_time: float,
+        local_state: np.ndarray,
     ) -> float:
-        """Become zero when the terminal set is reached."""
-
-        state_for_interpolation = np.clip(
-            state,
-            grid_lo,
-            grid_hi,
-        )
-
-        terminal_value = grid.interpolate(
-            brt_data["V0"],
-            jnp.asarray(state_for_interpolation),
-        )
+        del local_time
 
         return float(
-            terminal_value
+            collision_margin_sat(
+                local_state[0],
+                local_state[1],
+                local_state[2],
+            )
             - COLLISION_TOLERANCE
         )
 
-    def grid_boundary_event(
-        time: float,
-        state: np.ndarray,
+    def unconfined_grid_boundary_event(
+        local_time: float,
+        local_state: np.ndarray,
     ) -> float:
-        """Become zero when a grid boundary is reached."""
+        del local_time
+
+        selected_state = local_state[
+            unconfined_dimensions
+        ]
+
+        selected_lo = grid_lo[
+            unconfined_dimensions
+        ]
+
+        selected_hi = grid_hi[
+            unconfined_dimensions
+        ]
 
         distance_from_lower_boundary = (
-            state - grid_lo
+            selected_state - selected_lo
         )
 
         distance_from_upper_boundary = (
-            grid_hi - state
+            selected_hi - selected_state
         )
 
         return float(
             min(
-                np.min(
-                    distance_from_lower_boundary
-                ),
-                np.min(
-                    distance_from_upper_boundary
-                ),
+                np.min(distance_from_lower_boundary),
+                np.min(distance_from_upper_boundary),
             )
         )
 
-    collision_event.terminal = True
-    collision_event.direction = -1
+    physical_collision_event.terminal = (
+        STOP_ON_PHYSICAL_COLLISION
+    )
+    physical_collision_event.direction = -1
 
-    grid_boundary_event.terminal = True
-    grid_boundary_event.direction = -1
+    unconfined_grid_boundary_event.terminal = True
+    unconfined_grid_boundary_event.direction = -1
 
     # -----------------------------------------------------------------
     # Initial conditions and histories
@@ -467,20 +619,23 @@ def simulate(
     state = np.asarray(
         initial_state,
         dtype=float,
-    )
+    ).copy()
 
     times = []
     states = []
     brt_values = []
     terminal_values = []
+    collision_margins = []
     hamiltonians = []
     controls = []
     disturbances = []
+    unconstrained_controls = []
+    unconstrained_disturbances = []
 
+    first_terminal_value_time = None
     collision_time = None
-    stop_reason = "maximum simulation time reached"
 
-    pending_stop_reason = None
+    stop_reason = "maximum simulation time reached"
 
     number_of_steps = int(
         np.ceil(
@@ -492,12 +647,36 @@ def simulate(
     # Sample-and-hold simulation
     # -----------------------------------------------------------------
 
-    for _ in range(
-        number_of_steps + 1
-    ):
+    for _ in range(number_of_steps + 1):
         if not np.isfinite(state).all():
             stop_reason = "non-finite state reached"
             break
+
+        # Correct only negligible numerical drift in the directly
+        # confined states. Spatial/angular states are never clipped.
+        numerical_tolerance = 1e-9
+
+        controlled_dimensions = np.array(
+            [3, 4, 5],
+            dtype=int,
+        )
+
+        for dimension in controlled_dimensions:
+            if (
+                state[dimension]
+                < grid_lo[dimension]
+                and state[dimension]
+                >= grid_lo[dimension] - numerical_tolerance
+            ):
+                state[dimension] = grid_lo[dimension]
+
+            if (
+                state[dimension]
+                > grid_hi[dimension]
+                and state[dimension]
+                <= grid_hi[dimension] + numerical_tolerance
+            ):
+                state[dimension] = grid_hi[dimension]
 
         if (
             np.any(state < grid_lo)
@@ -506,10 +685,27 @@ def simulate(
             stop_reason = "state left grid"
             break
 
+        remaining_time = max(
+            MAX_SIMULATION_TIME - time,
+            0.0,
+        )
+
+        step_duration = min(
+            DT,
+            remaining_time,
+        )
+
+        evaluation_duration = (
+            step_duration
+            if step_duration > 0.0
+            else DT
+        )
+
         game = evaluate_game(
             brt_data=brt_data,
             state=state,
             time=time,
+            step_duration=evaluation_duration,
         )
 
         times.append(time)
@@ -521,6 +717,10 @@ def simulate(
 
         terminal_values.append(
             game["terminal_value"]
+        )
+
+        collision_margins.append(
+            game["collision_margin"]
         )
 
         hamiltonians.append(
@@ -535,55 +735,79 @@ def simulate(
             game["disturbance"].copy()
         )
 
-        # This happens when an event was detected during
-        # the previous integration interval.
-        if pending_stop_reason is not None:
-            stop_reason = pending_stop_reason
+        unconstrained_controls.append(
+            game["unconstrained_control"].copy()
+        )
 
-            if (
-                pending_stop_reason
-                == "terminal set reached"
-            ):
-                collision_time = time
+        unconstrained_disturbances.append(
+            game["unconstrained_disturbance"].copy()
+        )
 
-            break
+        # -------------------------------------------------------------
+        # Record V0 <= 0 without stopping
+        # -------------------------------------------------------------
 
         if (
             game["terminal_value"]
             <= COLLISION_TOLERANCE
+            and first_terminal_value_time is None
+        ):
+            first_terminal_value_time = time
+
+        if (
+            game["terminal_value"]
+            <= COLLISION_TOLERANCE
+            and STOP_ON_TERMINAL_VALUE
+        ):
+            stop_reason = "terminal value became non-positive"
+            break
+
+        # -------------------------------------------------------------
+        # Record physical collision without necessarily stopping
+        # -------------------------------------------------------------
+
+        if (
+            game["collision_margin"]
+            <= COLLISION_TOLERANCE
+            and collision_time is None
         ):
             collision_time = time
-            stop_reason = "terminal set reached"
+
+        if (
+            game["collision_margin"]
+            <= COLLISION_TOLERANCE
+            and STOP_ON_PHYSICAL_COLLISION
+        ):
+            stop_reason = "physical collision detected"
             break
+
+        # -------------------------------------------------------------
+        # Final time
+        # -------------------------------------------------------------
 
         if (
             time
-            >= MAX_SIMULATION_TIME
-            - 1e-12
+            >= MAX_SIMULATION_TIME - 1e-12
         ):
-            stop_reason = (
-                "maximum simulation time reached"
-            )
+            stop_reason = "maximum simulation time reached"
             break
-
-        control = game["control"]
-        disturbance = game["disturbance"]
 
         next_time = min(
             time + DT,
             MAX_SIMULATION_TIME,
         )
 
+        control = game["control"]
+        disturbance = game["disturbance"]
+
         # -------------------------------------------------------------
-        # Dynamics with control and disturbance fixed over [time,next_time]
+        # Dynamics with sample-and-hold inputs
         # -------------------------------------------------------------
 
         def fixed_input_dynamics(
             local_time: float,
             local_state: np.ndarray,
         ) -> np.ndarray:
-            """Evaluate dynamics with fixed inputs."""
-
             state_jax = jnp.asarray(
                 local_state
             )
@@ -617,8 +841,8 @@ def simulate(
             y0=state,
             method="RK45",
             events=[
-                collision_event,
-                grid_boundary_event,
+                physical_collision_event,
+                unconfined_grid_boundary_event,
             ],
             max_step=DT,
             rtol=1e-6,
@@ -631,35 +855,18 @@ def simulate(
                 f"{interval_solution.message}"
             )
 
-        # -------------------------------------------------------------
-        # Check interval events
-        # -------------------------------------------------------------
-
+        # Record the first continuous-time collision event.
         if (
-            len(
-                interval_solution.t_events[0]
-            )
-            > 0
+            collision_time is None
+            and len(interval_solution.t_events[0]) > 0
         ):
-            time = float(
+            collision_time = float(
                 interval_solution.t_events[0][0]
             )
 
-            state = np.asarray(
-                interval_solution.y_events[0][0],
-                dtype=float,
-            )
-
-            pending_stop_reason = (
-                "terminal set reached"
-            )
-
-        elif (
-            len(
-                interval_solution.t_events[1]
-            )
-            > 0
-        ):
+        # An exit of x_rel, y_rel or theta_rel cannot be corrected
+        # consistently without extending the BRT domain.
+        if len(interval_solution.t_events[1]) > 0:
             time = float(
                 interval_solution.t_events[1][0]
             )
@@ -669,21 +876,25 @@ def simulate(
                 dtype=float,
             )
 
-            pending_stop_reason = (
-                "grid boundary reached"
+            stop_reason = (
+                "unconfined state reached grid boundary"
             )
 
-        else:
-            time = next_time
+            break
 
-            state = np.asarray(
-                interval_solution.y[:, -1],
-                dtype=float,
-            )
+        time = next_time
 
-    # -----------------------------------------------------------------
-    # Convert histories to NumPy arrays
-    # -----------------------------------------------------------------
+        state = np.asarray(
+            interval_solution.y[:, -1],
+            dtype=float,
+        )
+
+        # Numerical cleanup only for v_H, delta_E and v_E.
+        state[3:6] = np.clip(
+            state[3:6],
+            grid_lo[3:6],
+            grid_hi[3:6],
+        )
 
     return {
         "time": np.asarray(
@@ -702,6 +913,10 @@ def simulate(
             terminal_values,
             dtype=float,
         ),
+        "collision_margin": np.asarray(
+            collision_margins,
+            dtype=float,
+        ),
         "hamiltonian": np.asarray(
             hamiltonians,
             dtype=float,
@@ -714,9 +929,95 @@ def simulate(
             disturbances,
             dtype=float,
         ),
+        "unconstrained_control": np.asarray(
+            unconstrained_controls,
+            dtype=float,
+        ),
+        "unconstrained_disturbance": np.asarray(
+            unconstrained_disturbances,
+            dtype=float,
+        ),
+        "first_terminal_value_time": (
+            first_terminal_value_time
+        ),
+        "terminal_value_became_non_positive": (
+            first_terminal_value_time is not None
+        ),
         "collision_time": collision_time,
+        "collision_occurred": (
+            collision_time is not None
+        ),
         "stop_reason": stop_reason,
     }
+
+
+def select_and_simulate_valid_case(
+    brt_data: dict,
+) -> tuple[np.ndarray, dict, int]:
+    """
+    Select a case that remains inside the non-periodic BRT grid
+    for the complete simulation horizon.
+    """
+
+    if INITIAL_STATE_MODE == "manual":
+        initial_state = select_initial_state(
+            brt_data
+        )
+
+        result = simulate(
+            brt_data=brt_data,
+            initial_state=initial_state,
+        )
+
+        if (
+            REQUIRE_FULL_HORIZON_INSIDE_GRID
+            and result["stop_reason"]
+            != "maximum simulation time reached"
+        ):
+            raise RuntimeError(
+                "The manual initial state does not remain inside "
+                "the BRT grid for the complete simulation horizon. "
+                f"Stop reason: {result['stop_reason']}"
+            )
+
+        return initial_state, result, 1
+
+    rng = np.random.default_rng(
+        RANDOM_SEED
+    )
+
+    for attempt in range(
+        1,
+        MAX_FULL_HORIZON_ATTEMPTS + 1,
+    ):
+        initial_state = select_initial_state(
+            brt_data=brt_data,
+            rng=rng,
+        )
+
+        result = simulate(
+            brt_data=brt_data,
+            initial_state=initial_state,
+        )
+
+        completed_full_horizon = (
+            result["stop_reason"]
+            == "maximum simulation time reached"
+        )
+
+        if (
+            completed_full_horizon
+            or not REQUIRE_FULL_HORIZON_INSIDE_GRID
+        ):
+            return initial_state, result, attempt
+
+    raise RuntimeError(
+        "No random initial state remained inside the BRT grid "
+        f"for {MAX_SIMULATION_TIME:.2f} s after "
+        f"{MAX_FULL_HORIZON_ATTEMPTS} attempts. "
+        "Increase the excluded border, change the initial-state "
+        "thresholds or enlarge the grid."
+    )
 
 
 def save_simulation_results(
@@ -770,7 +1071,18 @@ def save_simulation_results(
         "disturbance_names": list(
             DISTURBANCE_NAMES
         ),
-    }
+        "first_terminal_value_time": (
+            None
+            if result["first_terminal_value_time"] is None
+            else float(result["first_terminal_value_time"])
+        ),
+        "terminal_value_became_non_positive": bool(
+            result["terminal_value_became_non_positive"]
+        ),
+        "collision_occurred": bool(
+            result["collision_occurred"]
+        ),
+            }
 
     metadata_json = json.dumps(
         simulation_metadata,
@@ -808,6 +1120,21 @@ def save_simulation_results(
         metadata_json=np.asarray(
             metadata_json
         ),
+        collision_margin=result["collision_margin"],
+        first_terminal_value_time=np.asarray(
+            np.nan
+            if result["first_terminal_value_time"] is None
+            else result["first_terminal_value_time"],
+            dtype=float,
+        ),
+        collision_occurred=np.asarray(
+            result["collision_occurred"],
+            dtype=bool,
+        ),
+        terminal_value_became_non_positive=np.asarray(
+            result["terminal_value_became_non_positive"],
+            dtype=bool,
+),
     )
 
     return save_path
@@ -2141,13 +2468,14 @@ if __name__ == "__main__":
         brt_path
     )
 
-    initial_state = select_initial_state(
-        brt_data
+    initial_state, result, selection_attempt = (
+        select_and_simulate_valid_case(
+            brt_data
+        )
     )
 
-    result = simulate(
-        brt_data=brt_data,
-        initial_state=initial_state,
+    print(
+        "Full horizon selection attempts:"
     )
 
     absolute_trajectories = (
