@@ -2475,7 +2475,8 @@ if __name__ == "__main__":
     )
 
     print(
-        "Full horizon selection attempts:"
+        "Full horizon selection attempts:",
+        selection_attempt,
     )
 
     absolute_trajectories = (
