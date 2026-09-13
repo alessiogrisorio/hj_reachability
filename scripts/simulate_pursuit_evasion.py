@@ -87,8 +87,10 @@ RECOVERY_ENTRY_GRID_CELLS = 2.0
 RECOVERY_EXIT_GRID_CELLS = 4.0
 RECOVERY_PREDICTION_HORIZON = 0.75
 RECOVERY_PREDICTION_STEPS = 15
-RECOVERY_STEERING_SAMPLES = 5
-RECOVERY_ACCELERATION_SAMPLES = 5
+RECOVERY_GLOBAL_STEERING_SAMPLES = 9
+RECOVERY_GLOBAL_ACCELERATION_SAMPLES = 9
+RECOVERY_REFINED_STEERING_SAMPLES = 9
+RECOVERY_REFINED_ACCELERATION_SAMPLES = 9
 RECOVERY_SHADE_ALPHA = 0.14
 
 # Simple vehicle dimensions used only in the relative-frame animation.
@@ -639,11 +641,13 @@ def recovery_control(
     time: float,
 ) -> np.ndarray:
     """
-    Select an ego command with a short receding-horizon grid search.
+    Select the ego command that best returns all unconfined states
+    toward the grid interior.
 
-    During recovery the human travels straight at constant speed:
-    yaw rate = 0 and acceleration = 0. Candidate ego commands are
-    ranked by their predicted signed margin from the x/y/theta bounds.
+    A global command grid is evaluated first. A second, finer grid is
+    then centered on the best global command. Candidates are ranked
+    lexicographically: worst final margin, mean final margin, worst
+    margin over the rollout, and finally lower control effort.
     """
 
     dynamics = brt_data["dynamics"]
@@ -660,18 +664,6 @@ def recovery_control(
         dtype=float,
     )
 
-    steering_candidates = np.linspace(
-        control_lo[0],
-        control_hi[0],
-        RECOVERY_STEERING_SAMPLES,
-    )
-
-    acceleration_candidates = np.linspace(
-        control_lo[1],
-        control_hi[1],
-        RECOVERY_ACCELERATION_SAMPLES,
-    )
-
     human_straight = np.zeros(
         2,
         dtype=float,
@@ -682,99 +674,92 @@ def recovery_control(
         / RECOVERY_PREDICTION_STEPS
     )
 
-    best_control = np.zeros(
-        2,
-        dtype=float,
-    )
+    def evaluate_candidate(
+        candidate_control: np.ndarray,
+    ) -> tuple[float, float, float, float]:
+        """Return the lexicographic recovery score of one command."""
 
-    best_score = -np.inf
+        predicted_state = np.asarray(
+            state,
+            dtype=float,
+        ).copy()
 
-    for steering_rate in steering_candidates:
-        for acceleration in acceleration_candidates:
-            candidate_control = np.array(
-                [
-                    steering_rate,
-                    acceleration,
-                ],
-                dtype=float,
+        minimum_rollout_margin = np.inf
+
+        for rollout_index in range(
+            RECOVERY_PREDICTION_STEPS
+        ):
+            bounded_control, bounded_disturbance = (
+                enforce_controlled_state_bounds(
+                    state=predicted_state,
+                    control=candidate_control,
+                    disturbance=human_straight,
+                    grid_lo=grid_lo,
+                    grid_hi=grid_hi,
+                    step_duration=rollout_dt,
+                )
             )
 
-            predicted_state = np.asarray(
-                state,
-                dtype=float,
-            ).copy()
+            predicted_state_jax = jnp.asarray(
+                predicted_state
+            )
 
-            minimum_rollout_margin = np.inf
-
-            for rollout_index in range(
-                RECOVERY_PREDICTION_STEPS
-            ):
-                bounded_control, bounded_disturbance = (
-                    enforce_controlled_state_bounds(
-                        state=predicted_state,
-                        control=candidate_control,
-                        disturbance=human_straight,
-                        grid_lo=grid_lo,
-                        grid_hi=grid_hi,
-                        step_duration=rollout_dt,
-                    )
+            predicted_state_dot = (
+                dynamics.open_loop_dynamics(
+                    predicted_state_jax,
+                    time
+                    + rollout_index * rollout_dt,
                 )
+                + dynamics.control_jacobian(
+                    predicted_state_jax,
+                    time
+                    + rollout_index * rollout_dt,
+                ) @ jnp.asarray(bounded_control)
+                + dynamics.disturbance_jacobian(
+                    predicted_state_jax,
+                    time
+                    + rollout_index * rollout_dt,
+                ) @ jnp.asarray(bounded_disturbance)
+            )
 
-                predicted_state_jax = jnp.asarray(
-                    predicted_state
+            predicted_state = (
+                predicted_state
+                + rollout_dt
+                * np.asarray(
+                    predicted_state_dot,
+                    dtype=float,
                 )
+            )
 
-                predicted_state_dot = (
-                    dynamics.open_loop_dynamics(
-                        predicted_state_jax,
-                        time
-                        + rollout_index * rollout_dt,
-                    )
-                    + dynamics.control_jacobian(
-                        predicted_state_jax,
-                        time,
-                    ) @ jnp.asarray(bounded_control)
-                    + dynamics.disturbance_jacobian(
-                        predicted_state_jax,
-                        time,
-                    ) @ jnp.asarray(bounded_disturbance)
-                )
+            predicted_state[3:6] = np.clip(
+                predicted_state[3:6],
+                grid_lo[3:6],
+                grid_hi[3:6],
+            )
 
-                predicted_state = (
-                    predicted_state
-                    + rollout_dt
-                    * np.asarray(
-                        predicted_state_dot,
-                        dtype=float,
-                    )
-                )
-
-                predicted_state[3:6] = np.clip(
-                    predicted_state[3:6],
-                    grid_lo[3:6],
-                    grid_hi[3:6],
-                )
-
-                rollout_margin = np.min(
+            rollout_margin = float(
+                np.min(
                     normalized_unconfined_margins(
                         brt_data,
                         predicted_state,
                     )
                 )
-
-                minimum_rollout_margin = min(
-                    minimum_rollout_margin,
-                    rollout_margin,
-                )
-
-            final_margins = (
-                normalized_unconfined_margins(
-                    brt_data,
-                    predicted_state,
-                )
             )
 
-            normalized_effort = np.mean(
+            minimum_rollout_margin = min(
+                minimum_rollout_margin,
+                rollout_margin,
+            )
+
+        final_margins = (
+            normalized_unconfined_margins(
+                brt_data,
+                predicted_state,
+            )
+        )
+
+        normalized_effort = float(
+            np.mean(
                 (
                     2.0
                     * (candidate_control - control_lo)
@@ -782,17 +767,121 @@ def recovery_control(
                     - 1.0
                 ) ** 2
             )
+        )
 
-            score = (
-                2.0 * np.min(final_margins)
-                + 0.5 * np.mean(final_margins)
-                + 0.25 * minimum_rollout_margin
-                - 0.01 * normalized_effort
+        return (
+            float(np.min(final_margins)),
+            float(np.mean(final_margins)),
+            float(minimum_rollout_margin),
+            -normalized_effort,
+        )
+
+    def search_command_grid(
+        steering_candidates: np.ndarray,
+        acceleration_candidates: np.ndarray,
+        current_best_control: np.ndarray | None = None,
+        current_best_score: tuple[
+            float,
+            float,
+            float,
+            float,
+        ] | None = None,
+    ) -> tuple[
+        np.ndarray,
+        tuple[float, float, float, float],
+    ]:
+        """Evaluate a rectangular command grid."""
+
+        best_control = current_best_control
+        best_score = current_best_score
+
+        for steering_rate in steering_candidates:
+            for acceleration in acceleration_candidates:
+                candidate_control = np.array(
+                    [
+                        steering_rate,
+                        acceleration,
+                    ],
+                    dtype=float,
+                )
+
+                score = evaluate_candidate(
+                    candidate_control
+                )
+
+                if (
+                    best_score is None
+                    or score > best_score
+                ):
+                    best_score = score
+                    best_control = candidate_control
+
+        if best_control is None or best_score is None:
+            raise RuntimeError(
+                "The recovery command search produced no candidate."
             )
 
-            if score > best_score:
-                best_score = score
-                best_control = candidate_control
+        return best_control, best_score
+
+    global_steering_candidates = np.linspace(
+        control_lo[0],
+        control_hi[0],
+        RECOVERY_GLOBAL_STEERING_SAMPLES,
+    )
+
+    global_acceleration_candidates = np.linspace(
+        control_lo[1],
+        control_hi[1],
+        RECOVERY_GLOBAL_ACCELERATION_SAMPLES,
+    )
+
+    best_control, best_score = search_command_grid(
+        steering_candidates=global_steering_candidates,
+        acceleration_candidates=(
+            global_acceleration_candidates
+        ),
+    )
+
+    steering_step = (
+        control_hi[0] - control_lo[0]
+    ) / (RECOVERY_GLOBAL_STEERING_SAMPLES - 1)
+
+    acceleration_step = (
+        control_hi[1] - control_lo[1]
+    ) / (RECOVERY_GLOBAL_ACCELERATION_SAMPLES - 1)
+
+    refined_steering_candidates = np.linspace(
+        max(
+            control_lo[0],
+            best_control[0] - steering_step,
+        ),
+        min(
+            control_hi[0],
+            best_control[0] + steering_step,
+        ),
+        RECOVERY_REFINED_STEERING_SAMPLES,
+    )
+
+    refined_acceleration_candidates = np.linspace(
+        max(
+            control_lo[1],
+            best_control[1] - acceleration_step,
+        ),
+        min(
+            control_hi[1],
+            best_control[1] + acceleration_step,
+        ),
+        RECOVERY_REFINED_ACCELERATION_SAMPLES,
+    )
+
+    best_control, _ = search_command_grid(
+        steering_candidates=refined_steering_candidates,
+        acceleration_candidates=(
+            refined_acceleration_candidates
+        ),
+        current_best_control=best_control,
+        current_best_score=best_score,
+    )
 
     bounded_control, _ = enforce_controlled_state_bounds(
         state=state,
@@ -804,7 +893,6 @@ def recovery_control(
     )
 
     return bounded_control
-
 
 def evaluate_recovery(
     brt_data: dict,
