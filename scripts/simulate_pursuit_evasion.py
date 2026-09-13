@@ -1151,9 +1151,9 @@ def create_static_figure(
     disturbance = result["disturbance"]
 
     figure, axes = plt.subplots(
-        nrows=7,
+        nrows=5,
         ncols=1,
-        figsize=(12, 22),
+        figsize=(12, 16),
         sharex=True,
         constrained_layout=True,
     )
@@ -1217,116 +1217,116 @@ def create_static_figure(
     # 3. Ego controls
     # -----------------------------------------------------------------
 
-    axes[2].plot(
+    ego_steering_axis = axes[2]
+    ego_acceleration_axis = ego_steering_axis.twinx()
+
+    ego_steering_line, = ego_steering_axis.plot(
         time,
         np.rad2deg(control[:, 0]),
-        label="steering rate [deg/s]",
+        label="steering rate",
         color="tab:green",
         linewidth=1.8,
     )
 
-    axes[2].plot(
+    ego_acceleration_line, = ego_acceleration_axis.plot(
         time,
         control[:, 1],
-        label="acceleration [m/s²]",
+        label="acceleration",
         color="tab:red",
         linewidth=1.8,
     )
 
-    axes[2].set_ylabel("Ego control")
-    axes[2].legend()
-    axes[2].grid(True)
+    ego_steering_axis.set_ylabel(
+        "Steering rate [deg/s]",
+        color="tab:green",
+    )
+    ego_acceleration_axis.set_ylabel(
+        "Acceleration [m/s²]",
+        color="tab:red",
+    )
+    ego_steering_axis.tick_params(
+        axis="y",
+        colors="tab:green",
+    )
+    ego_acceleration_axis.tick_params(
+        axis="y",
+        colors="tab:red",
+    )
+    ego_steering_axis.legend(
+        [ego_steering_line, ego_acceleration_line],
+        ["steering rate", "acceleration"],
+        loc="upper right",
+    )
+    ego_steering_axis.grid(True)
 
     # -----------------------------------------------------------------
     # 4. Human disturbances
     # -----------------------------------------------------------------
 
-    axes[3].plot(
+    human_yaw_axis = axes[3]
+    human_acceleration_axis = human_yaw_axis.twinx()
+
+    human_yaw_line, = human_yaw_axis.plot(
         time,
         np.rad2deg(disturbance[:, 0]),
-        label="yaw rate [deg/s]",
+        label="yaw rate",
         color="tab:brown",
         linewidth=1.8,
     )
 
-    axes[3].plot(
+    human_acceleration_line, = human_acceleration_axis.plot(
         time,
         disturbance[:, 1],
-        label="acceleration [m/s²]",
+        label="acceleration",
         color="tab:pink",
         linewidth=1.8,
     )
 
-    axes[3].set_ylabel("Human input")
-    axes[3].legend()
-    axes[3].grid(True)
+    human_yaw_axis.set_ylabel(
+        "Yaw rate [deg/s]",
+        color="tab:brown",
+    )
+    human_acceleration_axis.set_ylabel(
+        "Acceleration [m/s²]",
+        color="tab:pink",
+    )
+    human_yaw_axis.tick_params(
+        axis="y",
+        colors="tab:brown",
+    )
+    human_acceleration_axis.tick_params(
+        axis="y",
+        colors="tab:pink",
+    )
+    human_yaw_axis.legend(
+        [human_yaw_line, human_acceleration_line],
+        ["yaw rate", "acceleration"],
+        loc="upper right",
+    )
+    human_yaw_axis.grid(True)
 
     # -----------------------------------------------------------------
-    # 5. Relative position
+    # 5. Vehicle speeds
     # -----------------------------------------------------------------
 
     axes[4].plot(
-        time,
-        state[:, 0],
-        label=r"$x_{rel}$",
-        linewidth=1.8,
-    )
-
-    axes[4].plot(
-        time,
-        state[:, 1],
-        label=r"$y_{rel}$",
-        linewidth=1.8,
-    )
-
-    axes[4].set_ylabel("Position [m]")
-    axes[4].legend()
-    axes[4].grid(True)
-
-    # -----------------------------------------------------------------
-    # 6. Relative angles
-    # -----------------------------------------------------------------
-
-    axes[5].plot(
-        time,
-        np.rad2deg(state[:, 2]),
-        label=r"$\theta_{rel}$",
-        linewidth=1.8,
-    )
-
-    axes[5].plot(
-        time,
-        np.rad2deg(state[:, 4]),
-        label=r"$\delta_E$",
-        linewidth=1.8,
-    )
-
-    axes[5].set_ylabel("Angle [deg]")
-    axes[5].legend()
-    axes[5].grid(True)
-
-    # -----------------------------------------------------------------
-    # 7. Vehicle speeds
-    # -----------------------------------------------------------------
-
-    axes[6].plot(
         time,
         state[:, 3],
         label=r"$v_H$",
         linewidth=1.8,
     )
 
-    axes[6].plot(
+    axes[4].plot(
         time,
         state[:, 5],
         label=r"$v_E$",
         linewidth=1.8,
     )
 
-    axes[6].set_ylabel("Speed [m/s]")
-    axes[6].set_xlabel("Simulation time [s]")
-    axes[6].legend()
-    axes[6].grid(True)
+    axes[4].set_ylabel("Speed [m/s]")
+    axes[4].set_xlabel("Simulation time [s]")
+    axes[4].legend()
+    axes[4].grid(True)
 
     # -----------------------------------------------------------------
     # Common temporal markers
@@ -1643,7 +1643,7 @@ def create_animation(
     )
 
     grid_specification = figure.add_gridspec(
-        nrows=7,
+        nrows=5,
         ncols=2,
         width_ratios=(1.3, 1.0),
     )
@@ -1665,24 +1665,18 @@ def create_animation(
         grid_specification[2, 1],
         sharex=value_axis,
     )
+    control_acceleration_axis = control_axis.twinx()
 
     disturbance_axis = figure.add_subplot(
         grid_specification[3, 1],
         sharex=value_axis,
     )
-
-    position_axis = figure.add_subplot(
-        grid_specification[4, 1],
-        sharex=value_axis,
-    )
-
-    angle_axis = figure.add_subplot(
-        grid_specification[5, 1],
-        sharex=value_axis,
+    disturbance_acceleration_axis = (
+        disturbance_axis.twinx()
     )
 
     speed_axis = figure.add_subplot(
-        grid_specification[6, 1],
+        grid_specification[4, 1],
         sharex=value_axis,
     )
 
@@ -1691,8 +1685,6 @@ def create_animation(
         hamiltonian_axis,
         control_axis,
         disturbance_axis,
-        position_axis,
-        angle_axis,
         speed_axis,
     )
 
@@ -1838,14 +1830,6 @@ def create_animation(
         disturbance[:, 0]
     )
 
-    theta_rel_deg = np.rad2deg(
-        state[:, 2]
-    )
-
-    delta_e_deg = np.rad2deg(
-        state[:, 4]
-    )
-
     value_axis.plot(
         time,
         result["brt_value"],
@@ -1878,7 +1862,7 @@ def create_animation(
         linewidth=1.0,
     )
 
-    control_axis.plot(
+    control_acceleration_axis.plot(
         time,
         control[:, 1],
         color="tab:red",
@@ -1894,42 +1878,10 @@ def create_animation(
         linewidth=1.0,
     )
 
-    disturbance_axis.plot(
+    disturbance_acceleration_axis.plot(
         time,
         disturbance[:, 1],
         color="tab:pink",
-        alpha=0.20,
-        linewidth=1.0,
-    )
-
-    position_axis.plot(
-        time,
-        state[:, 0],
-        color="tab:blue",
-        alpha=0.20,
-        linewidth=1.0,
-    )
-
-    position_axis.plot(
-        time,
-        state[:, 1],
-        color="tab:orange",
-        alpha=0.20,
-        linewidth=1.0,
-    )
-
-    angle_axis.plot(
-        time,
-        theta_rel_deg,
-        color="tab:green",
-        alpha=0.20,
-        linewidth=1.0,
-    )
-
-    angle_axis.plot(
-        time,
-        delta_e_deg,
-        color="tab:red",
         alpha=0.20,
         linewidth=1.0,
     )
@@ -1991,7 +1943,7 @@ def create_animation(
     )
 
     ego_acceleration_line, = (
-        control_axis.plot(
+        control_acceleration_axis.plot(
             [],
             [],
             color="tab:red",
@@ -2011,45 +1963,13 @@ def create_animation(
     )
 
     human_acceleration_line, = (
-        disturbance_axis.plot(
+        disturbance_acceleration_axis.plot(
             [],
             [],
             color="tab:pink",
             linewidth=2.0,
             label="acceleration [m/s²]",
         )
-    )
-
-    x_rel_line, = position_axis.plot(
-        [],
-        [],
-        color="tab:blue",
-        linewidth=2.0,
-        label=r"$x_{rel}$",
-    )
-
-    y_rel_line, = position_axis.plot(
-        [],
-        [],
-        color="tab:orange",
-        linewidth=2.0,
-        label=r"$y_{rel}$",
-    )
-
-    theta_rel_line, = angle_axis.plot(
-        [],
-        [],
-        color="tab:green",
-        linewidth=2.0,
-        label=r"$\theta_{rel}$",
-    )
-
-    delta_e_line, = angle_axis.plot(
-        [],
-        [],
-        color="tab:red",
-        linewidth=2.0,
-        label=r"$\delta_E$",
     )
 
     human_speed_line, = speed_axis.plot(
@@ -2088,10 +2008,38 @@ def create_animation(
 
     value_axis.set_ylabel("Value")
     hamiltonian_axis.set_ylabel("H")
-    control_axis.set_ylabel("Ego input")
-    disturbance_axis.set_ylabel("Human input")
-    position_axis.set_ylabel("Position [m]")
-    angle_axis.set_ylabel("Angle [deg]")
+    control_axis.set_ylabel(
+        "Steering rate [deg/s]",
+        color="tab:green",
+    )
+    control_acceleration_axis.set_ylabel(
+        "Acceleration [m/s²]",
+        color="tab:red",
+    )
+    disturbance_axis.set_ylabel(
+        "Yaw rate [deg/s]",
+        color="tab:brown",
+    )
+    disturbance_acceleration_axis.set_ylabel(
+        "Acceleration [m/s²]",
+        color="tab:pink",
+    )
+    control_axis.tick_params(
+        axis="y",
+        colors="tab:green",
+    )
+    control_acceleration_axis.tick_params(
+        axis="y",
+        colors="tab:red",
+    )
+    disturbance_axis.tick_params(
+        axis="y",
+        colors="tab:brown",
+    )
+    disturbance_acceleration_axis.tick_params(
+        axis="y",
+        colors="tab:pink",
+    )
     speed_axis.set_ylabel("Speed [m/s]")
     speed_axis.set_xlabel("Simulation time [s]")
 
@@ -2106,21 +2054,15 @@ def create_animation(
     )
 
     control_axis.legend(
+        [ego_steering_line, ego_acceleration_line],
+        ["steering rate", "acceleration"],
         loc="upper right",
         fontsize=8,
     )
 
     disturbance_axis.legend(
-        loc="upper right",
-        fontsize=8,
-    )
-
-    position_axis.legend(
-        loc="upper right",
-        fontsize=8,
-    )
-
-    angle_axis.legend(
+        [human_yaw_line, human_acceleration_line],
+        ["yaw rate", "acceleration"],
         loc="upper right",
         fontsize=8,
     )
@@ -2171,10 +2113,6 @@ def create_animation(
         ego_acceleration_line,
         human_yaw_line,
         human_acceleration_line,
-        x_rel_line,
-        y_rel_line,
-        theta_rel_line,
-        delta_e_line,
         human_speed_line,
         ego_speed_line,
     )
@@ -2276,30 +2214,6 @@ def create_animation(
             disturbance[
                 current_slice,
                 1,
-            ],
-        )
-
-        x_rel_line.set_data(
-            time[current_slice],
-            state[current_slice, 0],
-        )
-
-        y_rel_line.set_data(
-            time[current_slice],
-            state[current_slice, 1],
-        )
-
-        theta_rel_line.set_data(
-            time[current_slice],
-            theta_rel_deg[
-                current_slice
-            ],
-        )
-
-        delta_e_line.set_data(
-            time[current_slice],
-            delta_e_deg[
-                current_slice
             ],
         )
 
