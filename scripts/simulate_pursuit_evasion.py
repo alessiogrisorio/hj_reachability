@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
 from matplotlib.patches import Polygon
 
 project_root = Path(__file__).resolve().parents[1]
@@ -75,9 +76,20 @@ STOP_ON_PHYSICAL_COLLISION = False
 # Keep velocity and steering states inside their grid ranges.
 ENFORCE_CONTROLLED_STATE_BOUNDS = True
 
-# For random modes, reject trajectories that leave the spatial/angular grid.
+# For random modes, require a complete finite simulation.
 REQUIRE_FULL_HORIZON_INSIDE_GRID = True
 MAX_FULL_HORIZON_ATTEMPTS = 200
+
+# Hybrid HJ/recovery controller. Recovery starts before an unconfined
+# state reaches the grid boundary and ends only after a larger margin
+# has been recovered (hysteresis).
+RECOVERY_ENTRY_GRID_CELLS = 2.0
+RECOVERY_EXIT_GRID_CELLS = 4.0
+RECOVERY_PREDICTION_HORIZON = 0.75
+RECOVERY_PREDICTION_STEPS = 15
+RECOVERY_STEERING_SAMPLES = 5
+RECOVERY_ACCELERATION_SAMPLES = 5
+RECOVERY_SHADE_ALPHA = 0.14
 
 # Simple vehicle dimensions used only in the relative-frame animation.
 EGO_LENGTH = 4.68
@@ -530,6 +542,330 @@ def select_initial_state(
     )
 
 
+
+# -----------------------------------------------------------------------------
+# Hybrid HJ/recovery controller
+# -----------------------------------------------------------------------------
+def unconfined_grid_spacing(
+    brt_data: dict,
+) -> np.ndarray:
+    """Return the grid spacing of x_rel, y_rel and theta_rel."""
+
+    grid_shape = np.asarray(
+        brt_data["BRT"].shape,
+        dtype=float,
+    )
+
+    return (
+        brt_data["grid_hi"][:3]
+        - brt_data["grid_lo"][:3]
+    ) / (grid_shape[:3] - 1.0)
+
+
+def should_enter_recovery(
+    brt_data: dict,
+    state: np.ndarray,
+) -> bool:
+    """Check whether an unconfined state is close to a grid boundary."""
+
+    spacing = unconfined_grid_spacing(
+        brt_data
+    )
+
+    lower_guard = (
+        brt_data["grid_lo"][:3]
+        + RECOVERY_ENTRY_GRID_CELLS * spacing
+    )
+
+    upper_guard = (
+        brt_data["grid_hi"][:3]
+        - RECOVERY_ENTRY_GRID_CELLS * spacing
+    )
+
+    return bool(
+        np.any(state[:3] <= lower_guard)
+        or np.any(state[:3] >= upper_guard)
+    )
+
+
+def can_exit_recovery(
+    brt_data: dict,
+    state: np.ndarray,
+) -> bool:
+    """Check whether the state has returned to the inner HJ region."""
+
+    spacing = unconfined_grid_spacing(
+        brt_data
+    )
+
+    lower_guard = (
+        brt_data["grid_lo"][:3]
+        + RECOVERY_EXIT_GRID_CELLS * spacing
+    )
+
+    upper_guard = (
+        brt_data["grid_hi"][:3]
+        - RECOVERY_EXIT_GRID_CELLS * spacing
+    )
+
+    return bool(
+        np.all(state[:3] >= lower_guard)
+        and np.all(state[:3] <= upper_guard)
+    )
+
+
+def normalized_unconfined_margins(
+    brt_data: dict,
+    state: np.ndarray,
+) -> np.ndarray:
+    """
+    Return signed distances from the closest grid boundaries,
+    normalized by the corresponding domain widths.
+    """
+
+    grid_lo = brt_data["grid_lo"][:3]
+    grid_hi = brt_data["grid_hi"][:3]
+    widths = grid_hi - grid_lo
+
+    return np.minimum(
+        state[:3] - grid_lo,
+        grid_hi - state[:3],
+    ) / widths
+
+
+def recovery_control(
+    brt_data: dict,
+    state: np.ndarray,
+    time: float,
+) -> np.ndarray:
+    """
+    Select an ego command with a short receding-horizon grid search.
+
+    During recovery the human travels straight at constant speed:
+    yaw rate = 0 and acceleration = 0. Candidate ego commands are
+    ranked by their predicted signed margin from the x/y/theta bounds.
+    """
+
+    dynamics = brt_data["dynamics"]
+    grid_lo = brt_data["grid_lo"]
+    grid_hi = brt_data["grid_hi"]
+
+    control_lo = np.asarray(
+        dynamics.control_space.lo,
+        dtype=float,
+    )
+
+    control_hi = np.asarray(
+        dynamics.control_space.hi,
+        dtype=float,
+    )
+
+    steering_candidates = np.linspace(
+        control_lo[0],
+        control_hi[0],
+        RECOVERY_STEERING_SAMPLES,
+    )
+
+    acceleration_candidates = np.linspace(
+        control_lo[1],
+        control_hi[1],
+        RECOVERY_ACCELERATION_SAMPLES,
+    )
+
+    human_straight = np.zeros(
+        2,
+        dtype=float,
+    )
+
+    rollout_dt = (
+        RECOVERY_PREDICTION_HORIZON
+        / RECOVERY_PREDICTION_STEPS
+    )
+
+    best_control = np.zeros(
+        2,
+        dtype=float,
+    )
+
+    best_score = -np.inf
+
+    for steering_rate in steering_candidates:
+        for acceleration in acceleration_candidates:
+            candidate_control = np.array(
+                [
+                    steering_rate,
+                    acceleration,
+                ],
+                dtype=float,
+            )
+
+            predicted_state = np.asarray(
+                state,
+                dtype=float,
+            ).copy()
+
+            minimum_rollout_margin = np.inf
+
+            for rollout_index in range(
+                RECOVERY_PREDICTION_STEPS
+            ):
+                bounded_control, bounded_disturbance = (
+                    enforce_controlled_state_bounds(
+                        state=predicted_state,
+                        control=candidate_control,
+                        disturbance=human_straight,
+                        grid_lo=grid_lo,
+                        grid_hi=grid_hi,
+                        step_duration=rollout_dt,
+                    )
+                )
+
+                predicted_state_jax = jnp.asarray(
+                    predicted_state
+                )
+
+                predicted_state_dot = (
+                    dynamics.open_loop_dynamics(
+                        predicted_state_jax,
+                        time
+                        + rollout_index * rollout_dt,
+                    )
+                    + dynamics.control_jacobian(
+                        predicted_state_jax,
+                        time,
+                    ) @ jnp.asarray(bounded_control)
+                    + dynamics.disturbance_jacobian(
+                        predicted_state_jax,
+                        time,
+                    ) @ jnp.asarray(bounded_disturbance)
+                )
+
+                predicted_state = (
+                    predicted_state
+                    + rollout_dt
+                    * np.asarray(
+                        predicted_state_dot,
+                        dtype=float,
+                    )
+                )
+
+                predicted_state[3:6] = np.clip(
+                    predicted_state[3:6],
+                    grid_lo[3:6],
+                    grid_hi[3:6],
+                )
+
+                rollout_margin = np.min(
+                    normalized_unconfined_margins(
+                        brt_data,
+                        predicted_state,
+                    )
+                )
+
+                minimum_rollout_margin = min(
+                    minimum_rollout_margin,
+                    rollout_margin,
+                )
+
+            final_margins = (
+                normalized_unconfined_margins(
+                    brt_data,
+                    predicted_state,
+                )
+            )
+
+            normalized_effort = np.mean(
+                (
+                    2.0
+                    * (candidate_control - control_lo)
+                    / (control_hi - control_lo)
+                    - 1.0
+                ) ** 2
+            )
+
+            score = (
+                2.0 * np.min(final_margins)
+                + 0.5 * np.mean(final_margins)
+                + 0.25 * minimum_rollout_margin
+                - 0.01 * normalized_effort
+            )
+
+            if score > best_score:
+                best_score = score
+                best_control = candidate_control
+
+    bounded_control, _ = enforce_controlled_state_bounds(
+        state=state,
+        control=best_control,
+        disturbance=human_straight,
+        grid_lo=grid_lo,
+        grid_hi=grid_hi,
+        step_duration=DT,
+    )
+
+    return bounded_control
+
+
+def evaluate_recovery(
+    brt_data: dict,
+    state: np.ndarray,
+    time: float,
+) -> dict:
+    """Evaluate the physical dynamics while the HJ feedback is suspended."""
+
+    dynamics = brt_data["dynamics"]
+
+    control = recovery_control(
+        brt_data=brt_data,
+        state=state,
+        time=time,
+    )
+
+    disturbance = np.zeros(
+        2,
+        dtype=float,
+    )
+
+    state_jax = jnp.asarray(state)
+
+    state_dot = (
+        dynamics.open_loop_dynamics(
+            state_jax,
+            time,
+        )
+        + dynamics.control_jacobian(
+            state_jax,
+            time,
+        ) @ jnp.asarray(control)
+        + dynamics.disturbance_jacobian(
+            state_jax,
+            time,
+        ) @ jnp.asarray(disturbance)
+    )
+
+    return {
+        "brt_value": np.nan,
+        "terminal_value": np.nan,
+        "gradient": np.full(6, np.nan),
+        "control": control,
+        "disturbance": disturbance,
+        "unconstrained_control": control.copy(),
+        "unconstrained_disturbance": disturbance.copy(),
+        "state_dot": np.asarray(
+            state_dot,
+            dtype=float,
+        ),
+        "hamiltonian": np.nan,
+        "collision_margin": float(
+            collision_margin_sat(
+                state[0],
+                state[1],
+                state[2],
+            )
+        ),
+    }
+
+
 # -----------------------------------------------------------------------------
 # Simulation
 # -----------------------------------------------------------------------------
@@ -607,7 +943,9 @@ def simulate(
     )
     physical_collision_event.direction = -1
 
-    unconfined_grid_boundary_event.terminal = True
+    # The event is retained for diagnostics but no longer terminates
+    # the integration. Recovery handles boundary crossings.
+    unconfined_grid_boundary_event.terminal = False
     unconfined_grid_boundary_event.direction = -1
 
     # -----------------------------------------------------------------
@@ -631,6 +969,16 @@ def simulate(
     disturbances = []
     unconstrained_controls = []
     unconstrained_disturbances = []
+    modes = []
+
+    mode = (
+        "recovery"
+        if should_enter_recovery(
+            brt_data,
+            state,
+        )
+        else "hj"
+    )
 
     first_terminal_value_time = None
     collision_time = None
@@ -679,10 +1027,12 @@ def simulate(
                 state[dimension] = grid_hi[dimension]
 
         if (
-            np.any(state < grid_lo)
-            or np.any(state > grid_hi)
+            np.any(state[3:6] < grid_lo[3:6])
+            or np.any(state[3:6] > grid_hi[3:6])
         ):
-            stop_reason = "state left grid"
+            stop_reason = (
+                "controlled state left grid"
+            )
             break
 
         remaining_time = max(
@@ -701,12 +1051,37 @@ def simulate(
             else DT
         )
 
-        game = evaluate_game(
-            brt_data=brt_data,
-            state=state,
-            time=time,
-            step_duration=evaluation_duration,
-        )
+        if (
+            mode == "hj"
+            and should_enter_recovery(
+                brt_data,
+                state,
+            )
+        ):
+            mode = "recovery"
+
+        elif (
+            mode == "recovery"
+            and can_exit_recovery(
+                brt_data,
+                state,
+            )
+        ):
+            mode = "hj"
+
+        if mode == "hj":
+            game = evaluate_game(
+                brt_data=brt_data,
+                state=state,
+                time=time,
+                step_duration=evaluation_duration,
+            )
+        else:
+            game = evaluate_recovery(
+                brt_data=brt_data,
+                state=state,
+                time=time,
+            )
 
         times.append(time)
         states.append(state.copy())
@@ -742,6 +1117,8 @@ def simulate(
         unconstrained_disturbances.append(
             game["unconstrained_disturbance"].copy()
         )
+
+        modes.append(mode)
 
         # -------------------------------------------------------------
         # Record V0 <= 0 without stopping
@@ -864,24 +1241,6 @@ def simulate(
                 interval_solution.t_events[0][0]
             )
 
-        # An exit of x_rel, y_rel or theta_rel cannot be corrected
-        # consistently without extending the BRT domain.
-        if len(interval_solution.t_events[1]) > 0:
-            time = float(
-                interval_solution.t_events[1][0]
-            )
-
-            state = np.asarray(
-                interval_solution.y_events[1][0],
-                dtype=float,
-            )
-
-            stop_reason = (
-                "unconfined state reached grid boundary"
-            )
-
-            break
-
         time = next_time
 
         state = np.asarray(
@@ -936,6 +1295,10 @@ def simulate(
         "unconstrained_disturbance": np.asarray(
             unconstrained_disturbances,
             dtype=float,
+        ),
+        "mode": np.asarray(
+            modes,
+            dtype="<U8",
         ),
         "first_terminal_value_time": (
             first_terminal_value_time
@@ -1082,7 +1445,15 @@ def save_simulation_results(
         "collision_occurred": bool(
             result["collision_occurred"]
         ),
-            }
+        "recovery": {
+            "entry_grid_cells": RECOVERY_ENTRY_GRID_CELLS,
+            "exit_grid_cells": RECOVERY_EXIT_GRID_CELLS,
+            "prediction_horizon": RECOVERY_PREDICTION_HORIZON,
+            "prediction_steps": RECOVERY_PREDICTION_STEPS,
+            "human_yaw_rate": 0.0,
+            "human_acceleration": 0.0,
+        },
+    }
 
     metadata_json = json.dumps(
         simulation_metadata,
@@ -1095,6 +1466,7 @@ def save_simulation_results(
         state=result["state"],
         brt_value=result["brt_value"],
         terminal_value=result["terminal_value"],
+        mode=result["mode"],
         hamiltonian=result["hamiltonian"],
         control=result["control"],
         disturbance=result["disturbance"],
@@ -1138,6 +1510,176 @@ def save_simulation_results(
     )
 
     return save_path
+
+
+def recovery_time_intervals(
+    time: np.ndarray,
+    modes: np.ndarray,
+) -> list[tuple[float, float]]:
+    """Convert the sampled mode history into recovery time intervals."""
+
+    intervals = []
+    start_time = None
+
+    for index, mode in enumerate(modes):
+        if mode == "recovery" and start_time is None:
+            start_time = float(time[index])
+
+        leaving_recovery = (
+            mode != "recovery"
+            and start_time is not None
+        )
+
+        if leaving_recovery:
+            intervals.append(
+                (
+                    start_time,
+                    float(time[index]),
+                )
+            )
+            start_time = None
+
+    if start_time is not None:
+        intervals.append(
+            (
+                start_time,
+                float(time[-1]),
+            )
+        )
+
+    return intervals
+
+
+def shade_recovery_intervals(
+    axes,
+    time: np.ndarray,
+    modes: np.ndarray,
+) -> None:
+    """Shade recovery periods on time-history axes."""
+
+    intervals = recovery_time_intervals(
+        time=time,
+        modes=modes,
+    )
+
+    for axis in axes:
+        for start_time, end_time in intervals:
+            axis.axvspan(
+                start_time,
+                end_time,
+                color="red",
+                alpha=RECOVERY_SHADE_ALPHA,
+                linewidth=0.0,
+                zorder=0,
+            )
+
+
+def interpolate_brt_xy_slice(
+    brt_data: dict,
+    state: np.ndarray,
+    brt_array: np.ndarray,
+) -> np.ndarray | None:
+    """
+    Interpolate the BRT over theta_rel, v_H, delta_E and v_E,
+    leaving x_rel and y_rel as the two free dimensions.
+    """
+
+    coordinate_vectors = [
+        np.asarray(vector, dtype=float)
+        for vector in brt_data["grid"].coordinate_vectors
+    ]
+
+    fixed_indices = []
+    fixed_weights = []
+
+    for dimension in range(2, 6):
+        coordinates = coordinate_vectors[dimension]
+        value = float(state[dimension])
+
+        if (
+            value < coordinates[0]
+            or value > coordinates[-1]
+        ):
+            return None
+
+        upper_index = int(
+            np.searchsorted(
+                coordinates,
+                value,
+                side="right",
+            )
+        )
+
+        upper_index = min(
+            max(upper_index, 1),
+            len(coordinates) - 1,
+        )
+        lower_index = upper_index - 1
+
+        lower_coordinate = coordinates[lower_index]
+        upper_coordinate = coordinates[upper_index]
+
+        if upper_coordinate == lower_coordinate:
+            weight = 0.0
+        else:
+            weight = (
+                value - lower_coordinate
+            ) / (
+                upper_coordinate
+                - lower_coordinate
+            )
+
+        fixed_indices.append(
+            (
+                lower_index,
+                upper_index,
+            )
+        )
+        fixed_weights.append(weight)
+
+    xy_slice = np.zeros(
+        brt_array.shape[:2],
+        dtype=float,
+    )
+
+    for corner in range(16):
+        indices = []
+        corner_weight = 1.0
+
+        for local_dimension in range(4):
+            use_upper = (
+                corner >> local_dimension
+            ) & 1
+
+            indices.append(
+                fixed_indices[local_dimension][
+                    use_upper
+                ]
+            )
+
+            weight = fixed_weights[
+                local_dimension
+            ]
+
+            corner_weight *= (
+                weight
+                if use_upper
+                else 1.0 - weight
+            )
+
+        xy_slice += (
+            corner_weight
+            * brt_array[
+                :,
+                :,
+                indices[0],
+                indices[1],
+                indices[2],
+                indices[3],
+            ]
+        )
+
+    return xy_slice
 
 
 def create_static_figure(
@@ -1352,6 +1894,12 @@ def create_static_figure(
                 linewidth=1.5,
                 label="_nolegend_",
             )
+
+    shade_recovery_intervals(
+        axes=axes,
+        time=time,
+        modes=result["mode"],
+    )
 
     # -----------------------------------------------------------------
     # Optional saving
@@ -1595,6 +2143,7 @@ def vehicle_polygon(
 
 def create_animation(
     result: dict,
+    brt_data: dict,
 ) -> tuple[
     plt.Figure,
     animation.FuncAnimation,
@@ -1606,6 +2155,28 @@ def create_animation(
     state = result["state"]
     control = result["control"]
     disturbance = result["disturbance"]
+    modes = result["mode"]
+
+    brt_array = np.asarray(
+        brt_data["BRT"],
+        dtype=float,
+    )
+
+    relative_x_coordinates = np.asarray(
+        brt_data["grid"].coordinate_vectors[0],
+        dtype=float,
+    )
+
+    relative_y_coordinates = np.asarray(
+        brt_data["grid"].coordinate_vectors[1],
+        dtype=float,
+    )
+
+    relative_x_mesh, relative_y_mesh = np.meshgrid(
+        relative_x_coordinates,
+        relative_y_coordinates,
+        indexing="ij",
+    )
 
     ego_x = result["ego_x"]
     ego_y = result["ego_y"]
@@ -1814,9 +2385,31 @@ def create_animation(
         },
     )
 
-    vehicle_axis.legend(
-        loc="lower right"
+    brt_contour_proxy = Line2D(
+        [],
+        [],
+        color="tab:blue",
+        linestyle="--",
+        linewidth=2.0,
+        label=r"$V(-3,x)=0$",
     )
+
+    vehicle_axis.legend(
+        handles=[
+            ego_trajectory_line,
+            human_trajectory_line,
+            ego_polygon,
+            human_polygon,
+            brt_contour_proxy,
+        ],
+        loc="lower right",
+    )
+
+    # Mutable containers allow the frame callback to replace the
+    # Matplotlib contour without using global state.
+    current_brt_contour = [None]
+    last_valid_brt_slice = [None]
+
 
     # -----------------------------------------------------------------
     # Complete signal curves in the background
@@ -2092,6 +2685,12 @@ def create_animation(
             linewidth=1.0,
         )
 
+    shade_recovery_intervals(
+        axes=signal_axes,
+        time=time,
+        modes=modes,
+    )
+
     # -----------------------------------------------------------------
     # Moving time indicators
     # -----------------------------------------------------------------
@@ -2169,6 +2768,79 @@ def create_animation(
             )
         )
 
+        interpolated_slice = interpolate_brt_xy_slice(
+            brt_data=brt_data,
+            state=state[data_index],
+            brt_array=brt_array,
+        )
+
+        contour_is_current = (
+            interpolated_slice is not None
+        )
+
+        if contour_is_current:
+            last_valid_brt_slice[0] = (
+                interpolated_slice
+            )
+        else:
+            interpolated_slice = (
+                last_valid_brt_slice[0]
+            )
+
+        if current_brt_contour[0] is not None:
+            current_brt_contour[0].remove()
+            current_brt_contour[0] = None
+
+        if (
+            interpolated_slice is not None
+            and np.nanmin(interpolated_slice) <= 0.0
+            and np.nanmax(interpolated_slice) >= 0.0
+        ):
+            cosine_heading = np.cos(
+                ego_heading[data_index]
+            )
+            sine_heading = np.sin(
+                ego_heading[data_index]
+            )
+
+            contour_x = (
+                ego_x[data_index]
+                + cosine_heading
+                * relative_x_mesh
+                - sine_heading
+                * relative_y_mesh
+            )
+
+            contour_y = (
+                ego_y[data_index]
+                + sine_heading
+                * relative_x_mesh
+                + cosine_heading
+                * relative_y_mesh
+            )
+
+            current_brt_contour[0] = (
+                vehicle_axis.contour(
+                    contour_x,
+                    contour_y,
+                    interpolated_slice,
+                    levels=[0.0],
+                    colors=(
+                        "tab:blue"
+                        if contour_is_current
+                        else "gray"
+                    ),
+                    linestyles="--",
+                    linewidths=2.0,
+                    alpha=(
+                        0.85
+                        if contour_is_current
+                        else 0.30
+                    ),
+                    zorder=2,
+                )
+            )
+
         brt_line.set_data(
             time[current_slice],
             result["brt_value"][
@@ -2243,8 +2915,17 @@ def create_animation(
                 f"{result['stop_reason']}"
             )
 
+        current_mode = modes[data_index].upper()
+
+        information_text.set_color(
+            "red"
+            if current_mode == "RECOVERY"
+            else "black"
+        )
+
         information_text.set_text(
             f"t = {current_time:6.2f} s\n"
+            f"mode = {current_mode}\n"
             f"V = "
             f"{result['brt_value'][data_index]: .4f}\n"
             f"V0 = "
@@ -2447,6 +3128,7 @@ if __name__ == "__main__":
             animation_path,
         ) = create_animation(
             result=result,
+            brt_data=brt_data,
         )
 
         print(
