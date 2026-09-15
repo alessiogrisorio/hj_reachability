@@ -31,8 +31,8 @@ class Config:
     negative_threshold: float = -0.20
     positive_threshold: float = 0.20
     minimum_v0: float = 0.10
-    entry_cells: float = 2.0
-    exit_cells: float = 4.0
+    entry_cells: float = 1.0
+    exit_cells: float = 1.0
     prediction_steps: int = 6
     prediction_dt: float = 0.10
     command_samples: int = 5

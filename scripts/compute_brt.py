@@ -42,7 +42,7 @@ SOLVER_ACCURACY = "very_high"
 
 # Scelta della metrica
 # euclidean, ttc, dce
-METRIC_NAME = "ttc"
+METRIC_NAME = "euclidean"
 
 METRIC_PARAMETERS = {
     "euclidean": {
@@ -70,7 +70,7 @@ GRID_LO = np.array(
     [
         -12.0,
         -8.0,
-        -np.pi / 4,
+        -np.pi,
         1.0,
         -np.pi / 12,
         1.0,
@@ -82,7 +82,7 @@ GRID_HI = np.array(
     [
         17.0,
         8.0,
-        np.pi / 4,
+        np.pi,
         11.0,
         np.pi / 12,
         11.0,
@@ -90,8 +90,8 @@ GRID_HI = np.array(
     dtype=np.float32,
 )
 
-GRID_SHAPE = (30, 17, 15, 8, 21, 8)
-PERIODIC_DIMS: tuple[int, ...] = ()
+GRID_SHAPE = (30, 17, 48, 8, 11, 8)
+PERIODIC_DIMS: tuple[int, ...] = (2,)
 
 #---- Dynamics ----#
 DYNAMICS_PARAMETERS = {
