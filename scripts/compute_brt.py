@@ -42,7 +42,7 @@ SOLVER_ACCURACY = "very_high"
 
 # Scelta della metrica
 # euclidean, ttc, dce
-METRIC_NAME = "euclidean"
+METRIC_NAME = "dce"
 
 METRIC_PARAMETERS = {
     "euclidean": {
