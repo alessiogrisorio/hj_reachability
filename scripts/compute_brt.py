@@ -102,7 +102,7 @@ DYNAMICS_PARAMETERS = {
     "ego_max_steering_rate": 0.087,
     "human_min_acceleration": -7.0,
     "human_max_acceleration": 2.5,
-    "human_max_yaw_rate": 1.0,
+    "human_max_yaw_rate": 0.15,
     "control_mode": "max",
     "disturbance_mode": "min",
 }

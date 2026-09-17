@@ -498,7 +498,7 @@ def simulate_pursuit_evasion(
         v_zero_text = f"{v_zero:.4f}" if np.isfinite(v_zero) else "N/A"
         info.set_color("red" if mode == "RECOVERY" else "black")
         info.set_text(
-            f"t = {times[frame]:.2f} s    V(-3) = {v_brt_text}    "
+            f"Metric: {metric}    t = {times[frame]:.2f} s    V(-3) = {v_brt_text}    "
             f"V(0) = {v_zero_text}    Mode = {mode}"
         )
         return ego_body, human_body, ego_path, human_path, info, *lines
