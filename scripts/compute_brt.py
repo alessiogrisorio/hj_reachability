@@ -23,6 +23,7 @@ from hj_reachability.vehicle.metrics import (
     metricTTC,
     metricDCE,
     metricEggert,
+    metricRSS,
 )
 
 #---- Configuration ----#
@@ -42,8 +43,8 @@ TARGET_TIME = -3.0
 SOLVER_ACCURACY = "very_high"
 
 # Scelta della metrica
-# euclidean, ttc, dce, eggert
-METRIC_NAME = "eggert"
+# euclidean, ttc, dce, eggert, rss
+METRIC_NAME = "rss"
 
 METRIC_PARAMETERS = {
     "euclidean": {
@@ -76,7 +77,17 @@ METRIC_PARAMETERS = {
         "contact_time_tolerance": 1e-5,
         "batch_size": 10_000,
         "use_symmetry": True,
-    }
+    },
+    "rss": {
+        "rho": 0.496,
+        "mu": 0.20,
+        "a_max_accel": 2.5,
+        "a_min_brake": 3.482,
+        "a_max_brake": 7.0,
+        "a_lat_max_accel": 0.68,
+        "a_lat_min_brake": 0.45,
+        "use_symmetry": True,
+    },   
 }
 
 GRID_LO = np.array(
@@ -193,6 +204,12 @@ def compute_terminal_metric(
         return metricEggert(
             grid=grid,
             dynamics=dynamics,
+            **parameters,
+        )
+
+    if METRIC_NAME == "rss":
+        return metricRSS(
+            grid=grid,
             **parameters,
         )
 
@@ -409,6 +426,22 @@ if __name__ == "__main__":
             f"{np.max(metric_result.probability):.6f}]"
         )
 
+    if METRIC_NAME == "rss":
+        parameters = metric_result.parameters
+
+        print(f"RSS response time: {parameters['rho']:.6f} s")
+        print(f"RSS lateral margin: {parameters['mu']:.6f} m")
+        print(
+            "RSS minimum longitudinal braking: "
+            f"{parameters['a_min_brake']:.6f} m/s²"
+        )
+        print(f"Symmetry used: {parameters['symmetry_used']}")
+        print(
+            "Evaluated states: "
+            f"{parameters['evaluated_states']:,} / "
+            f"{parameters['total_states']:,}"
+        )
+
     if tuple(V0.shape) != tuple(grid.shape):
         raise ValueError(
             "V0 shape does not match the grid shape: "
@@ -563,6 +596,20 @@ if __name__ == "__main__":
         metadata["arrays"]["first_contact_time_no_contact_value"] = (
             "+inf"
         )
+
+    if METRIC_NAME == "rss":
+        metadata["metric"].update({
+            "implementation_parameters": metric_result.parameters,
+            "terminal_value_definition": (
+                "V0 = max(d_long - d_safe_long, d_lat - d_safe_lat)"
+            ),
+            "unsafe_set_definition": (
+                "Both projected separations are at or below "
+                "their RSS thresholds"
+            ),
+            "model": "RSS projected onto the ego axes",
+            "delta_invariant_terminal_value": True,
+        })
 
     metadata_json = json.dumps(
         metadata,
