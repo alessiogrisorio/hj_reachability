@@ -22,6 +22,7 @@ from hj_reachability.vehicle.metrics import (
     metricEuclidean,
     metricTTC,
     metricDCE,
+    metricEggert,
 )
 
 #---- Configuration ----#
@@ -41,8 +42,8 @@ TARGET_TIME = -3.0
 SOLVER_ACCURACY = "very_high"
 
 # Scelta della metrica
-# euclidean, ttc, dce
-METRIC_NAME = "dce"
+# euclidean, ttc, dce, eggert
+METRIC_NAME = "eggert"
 
 METRIC_PARAMETERS = {
     "euclidean": {
@@ -63,6 +64,18 @@ METRIC_PARAMETERS = {
         "batch_size": 100_000,
         "n_theta": 90,
         "n_phi": 180,
+    },
+    "eggert": {
+        "horizon": 1.0,
+        "dt": 0.05,
+        "beta_d": 2.0,
+        "tau_d0": 0.3,
+        "escape_rate": 0.1,
+        "p_crit": 0.8,
+        "collision_tolerance": 1e-9,
+        "contact_time_tolerance": 1e-5,
+        "batch_size": 10_000,
+        "use_symmetry": True,
     }
 }
 
@@ -164,7 +177,6 @@ def compute_terminal_metric(
             n_theta=parameters["n_theta"],
             n_phi=parameters["n_phi"],
         )
-
         return metricDCE(
             grid=grid,
             dynamics=dynamics,
@@ -175,6 +187,13 @@ def compute_terminal_metric(
                 parameters["collision_tolerance"]
             ),
             batch_size=parameters["batch_size"],
+        )
+
+    if METRIC_NAME == "eggert":
+        return metricEggert(
+            grid=grid,
+            dynamics=dynamics,
+            **parameters,
         )
 
     raise RuntimeError(
@@ -316,7 +335,13 @@ if __name__ == "__main__":
         dynamics=dynamics,
     )
 
-    V0 = metric_result.terminal_values
+    V0 = jnp.asarray(
+        metric_result.terminal_values,
+        dtype=jnp.float32,
+    )
+
+    if not bool(jnp.all(jnp.isfinite(V0))):
+        raise ValueError("V0 contains NaN or infinite values.")
 
     print(f"V0 shape: {V0.shape}")
     print(
@@ -361,6 +386,27 @@ if __name__ == "__main__":
             "TCE range: "
             f"[{float(jnp.min(metric_result.tce)):.6f}, "
             f"{float(jnp.max(metric_result.tce)):.6f}] s"
+        )
+
+    if METRIC_NAME == "eggert":
+        parameters = metric_result.parameters
+
+        print(f"Eggert horizon: {parameters['horizon']:.6f} s")
+        print(f"Eggert time step: {parameters['dt']:.6f} s")
+        print(f"Critical probability: {parameters['p_crit']:.6f}")
+        print(f"Distance sensitivity: {parameters['beta_d']:.6f} 1/m")
+        print(f"Critical-rate time scale: {parameters['tau_d0']:.6f} s")
+        print(f"Escape rate: {parameters['escape_rate']:.6f} 1/s")
+        print(f"Symmetry used: {parameters['symmetry_used']}")
+        print(
+            "Evaluated states: "
+            f"{parameters['evaluated_states']:,} / "
+            f"{parameters['total_states']:,}"
+        )
+        print(
+            "Probability range: "
+            f"[{np.min(metric_result.probability):.6f}, "
+            f"{np.max(metric_result.probability):.6f}]"
         )
 
     if tuple(V0.shape) != tuple(grid.shape):
@@ -461,6 +507,17 @@ if __name__ == "__main__":
             )
         )
 
+    if METRIC_NAME == "eggert":
+        additional_metric_arrays["P_H"] = np.asarray(
+            metric_result.probability,
+            dtype=np.float32,
+        )
+
+        additional_metric_arrays["first_contact_time"] = np.asarray(
+            metric_result.first_contact_time,
+            dtype=np.float32,
+        )
+
     coordinate_vectors = [
         np.asarray(vector, dtype=np.float32)
         for vector in grid.coordinate_vectors
@@ -477,6 +534,34 @@ if __name__ == "__main__":
             additional_metric_arrays[
                 "TCE"
             ].shape
+        )
+
+    if METRIC_NAME == "eggert":
+        metadata["metric"]["implementation_parameters"] = (
+            metric_result.parameters
+        )
+
+        metadata["metric"]["terminal_value_definition"] = (
+            "V0 = p_crit - P_H"
+        )
+        metadata["metric"]["unsafe_set_definition"] = (
+            "P_H >= p_crit"
+        )
+        metadata["metric"]["distance_definition"] = (
+            "Minimum Euclidean distance between filled vehicle rectangles"
+        )
+        metadata["metric"]["nominal_prediction"] = (
+            "Constant v_H, v_E and delta_E; zero human yaw rate"
+        )
+
+        metadata["arrays"]["P_H_shape"] = list(
+            additional_metric_arrays["P_H"].shape
+        )
+        metadata["arrays"]["first_contact_time_shape"] = list(
+            additional_metric_arrays["first_contact_time"].shape
+        )
+        metadata["arrays"]["first_contact_time_no_contact_value"] = (
+            "+inf"
         )
 
     metadata_json = json.dumps(
