@@ -82,7 +82,7 @@ METRIC_PARAMETERS = {
         "rho": 0.496,
         "mu": 0.20,
         "a_max_accel": 2.5,
-        "a_min_brake": 3.482,
+        "a_min_brake": 7.0,
         "a_max_brake": 7.0,
         "a_lat_max_accel": 0.68,
         "a_lat_min_brake": 0.45,

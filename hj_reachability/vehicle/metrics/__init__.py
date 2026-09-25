@@ -10,7 +10,7 @@ __all__ = [
     "EuclideanMetricResult",
     "TTCMetricResult",
     "DCEMetricResult",
-    "EggertMetricResult"
+    "EggertMetricResult",
     "RSSMetricResult",
     "metricEuclidean",
     "metricTTC",

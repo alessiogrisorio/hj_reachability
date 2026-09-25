@@ -11,7 +11,7 @@ from ..geometry.rectangles import (
 
 @dataclass
 class RSSMetricResult:
-    teminal_values: np.darray
+    terminal_values: np.ndarray
     parameters: dict
 
 
@@ -23,7 +23,7 @@ def metricRSS(
     rho: float = 0.496,
     mu: float = 0.2,
     a_max_accel: float = 2.5,
-    a_min_brake: float = 3.482,
+    a_min_brake: float = 7.0,
     a_max_brake: float = 7.0,
     a_lat_max_accel: float = 0.68,
     a_lat_min_brake: float = 0.45,
