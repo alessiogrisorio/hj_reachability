@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from itertools import product
+
+import contourpy
 import sys
 import gc
 from pathlib import Path
@@ -12,7 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from IPython.display import HTML
 from matplotlib import transforms
-
+from matplotlib.collections import LineCollection
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -21,13 +24,11 @@ if str(ROOT) not in sys.path:
 import hj_reachability as hj
 from hj_reachability.systems.relative_vehicle_6d import RelativeVehicle6D
 
-
-# Same recovery parameters used by pursuit_evasion_recovery.ipynb.
-RECOVERY_HORIZON = 0.6
-RECOVERY_DT = 0.2
-RECOVERY_YAW_SAMPLES = 4
-RECOVERY_ACCELERATION_SAMPLES = 4
-
+RECOVERY_POSITION_GAIN = 0.5
+RECOVERY_ACCELERATION_WEIGHT = 1.0
+RECOVERY_YAW_WEIGHT = 1.0
+RECOVERY_LOW_SPEED = 0.2
+RECOVERY_HEADING_GAIN = 1.0
 
 def simulate_pursuit_evasion(
     metric: str,
@@ -48,7 +49,6 @@ def simulate_pursuit_evasion(
     """
     gc.collect()
     jax.clear_caches()
-    
     if not metric or Path(metric).name != metric or metric.endswith(".npz"):
         raise ValueError("metric must be a file name without '.npz', e.g. 'dce'.")
     if T <= 0 or dt <= 0 or animation_time_scale_factor <= 0:
@@ -172,19 +172,6 @@ def simulate_pursuit_evasion(
             for dimension in range(6)
         )
 
-    yaw_candidates = np.unique(np.concatenate([
-        np.linspace(human_input_min[0], human_input_max[0], RECOVERY_YAW_SAMPLES),
-        [0.0],
-    ]))
-    acceleration_candidates = np.unique(np.concatenate([
-        np.linspace(
-            human_input_min[1], human_input_max[1],
-            RECOVERY_ACCELERATION_SAMPLES,
-        ),
-        [0.0],
-    ]))
-    prediction_steps = int(round(RECOVERY_HORIZON / RECOVERY_DT))
-
     joint_states = [np.concatenate([ego_initial_state, human_initial_state])]
     times, modes = [], []
     brt_history, terminal_history, hamiltonian_history = [], [], []
@@ -246,107 +233,134 @@ def simulate_pursuit_evasion(
             ego_controls.append(np.asarray(control, dtype=float))
             human_controls.append(np.asarray(disturbance, dtype=float))
         else:
-            delta_e, v_e = current_relative_state[4], current_relative_state[5]
+            delta_e = current_relative_state[4]
+            v_e = current_relative_state[5]
+            v_h = current_relative_state[3]
+
             ego_control = np.array([
-                np.clip(-delta_e / dt, ego_input_min[0], ego_input_max[0]),
+                np.clip(
+                    -delta_e / dt,
+                    ego_input_min[0],
+                    ego_input_max[0],
+                ),
                 np.clip(
                     np.clip(
                         (recovery_reference_speed - v_e) / dt,
-                        ego_input_min[1], ego_input_max[1],
+                        ego_input_min[1],
+                        ego_input_max[1],
                     ),
                     (grid_lo[5] - v_e) / dt,
                     (grid_hi[5] - v_e) / dt,
                 ),
             ])
 
-            best_human_control = None
-            best_final_distance = np.inf
-            for yaw_rate in yaw_candidates:
-                for acceleration in acceleration_candidates:
-                    predicted_state = current_joint_state.copy()
-                    for _ in range(prediction_steps):
-                        predicted_relative = np.asarray(
-                            relative_state(jnp.asarray(predicted_state)), dtype=float
-                        )
-                        predicted_v_h = predicted_relative[3]
-                        predicted_delta_e = predicted_relative[4]
-                        predicted_v_e = predicted_relative[5]
-                        predicted_input = np.array([
-                            np.clip(
-                                -predicted_delta_e / RECOVERY_DT,
-                                ego_input_min[0], ego_input_max[0],
-                            ),
-                            np.clip(
-                                np.clip(
-                                    (recovery_reference_speed - predicted_v_e)
-                                    / RECOVERY_DT,
-                                    ego_input_min[1], ego_input_max[1],
-                                ),
-                                (grid_lo[5] - predicted_v_e) / RECOVERY_DT,
-                                (grid_hi[5] - predicted_v_e) / RECOVERY_DT,
-                            ),
-                            yaw_rate,
-                            np.clip(
-                                acceleration,
-                                (grid_lo[3] - predicted_v_h) / RECOVERY_DT,
-                                (grid_hi[3] - predicted_v_h) / RECOVERY_DT,
-                            ),
-                        ])
-                        predicted_state += np.asarray(
-                            joint_dynamics(
-                                jnp.asarray(predicted_state),
-                                jnp.asarray(predicted_input),
-                            ),
-                            dtype=float,
-                        ) * RECOVERY_DT
-                        predicted_state[3] = np.clip(
-                            predicted_state[3], grid_lo[4], grid_hi[4]
-                        )
-                        predicted_state[4] = np.clip(
-                            predicted_state[4], grid_lo[5], grid_hi[5]
-                        )
-                        predicted_state[8] = np.clip(
-                            predicted_state[8], grid_lo[3], grid_hi[3]
-                        )
+            psi_e = current_joint_state[2]
+            psi_h = current_joint_state[7]
 
-                    final_distance = np.linalg.norm(
-                        predicted_state[5:7] - predicted_state[0:2]
-                    )
-                    candidate = np.array([yaw_rate, acceleration])
-                    better = final_distance < best_final_distance - 1e-9
-                    equal = abs(final_distance - best_final_distance) <= 1e-9
-                    better_tie = (
-                        best_human_control is None
-                        or abs(yaw_rate) < abs(best_human_control[0]) - 1e-9
-                        or (
-                            abs(abs(yaw_rate) - abs(best_human_control[0])) <= 1e-9
-                            and abs(acceleration)
-                            < abs(best_human_control[1]) - 1e-9
-                        )
-                    )
-                    if better or (equal and better_tie):
-                        best_final_distance = final_distance
-                        best_human_control = candidate
+            position_error = (
+                current_joint_state[0:2] - current_joint_state[5:7]
+            )
 
-            v_h = current_relative_state[3]
+            beta_e = np.arctan(
+                dynamics.lr / (dynamics.lr + dynamics.lf)
+                * np.tan(delta_e)
+            )
+
+            ego_velocity = v_e * np.array([
+                np.cos(psi_e + beta_e),
+                np.sin(psi_e + beta_e),
+            ])
+
+            desired_velocity = (
+                ego_velocity
+                + RECOVERY_POSITION_GAIN * position_error
+            )
+
+            human_heading = np.array([
+                np.cos(psi_h),
+                np.sin(psi_h),
+            ])
+            human_normal = np.array([
+                -np.sin(psi_h),
+                np.cos(psi_h),
+            ])
+
+            velocity_error = v_h * human_heading - desired_velocity
+
+            acceleration_command = (
+                -np.dot(velocity_error, human_heading)
+                / RECOVERY_ACCELERATION_WEIGHT
+            )
+
+            yaw_command = (
+                -v_h * np.dot(velocity_error, human_normal)
+                / RECOVERY_YAW_WEIGHT
+            )
+
+            if abs(v_h) < RECOVERY_LOW_SPEED:
+                if np.linalg.norm(desired_velocity) > 1e-9:
+                    desired_heading = np.arctan2(
+                        desired_velocity[1],
+                        desired_velocity[0],
+                    )
+                    heading_error = np.arctan2(
+                        np.sin(desired_heading - psi_h),
+                        np.cos(desired_heading - psi_h),
+                    )
+                    yaw_command = (
+                        RECOVERY_HEADING_GAIN * heading_error
+                    )
+                else:
+                    yaw_command = 0.0
+
+            acceleration_lower = max(
+                human_input_min[1],
+                (grid_lo[3] - v_h) / dt,
+            )
+            acceleration_upper = min(
+                human_input_max[1],
+                (grid_hi[3] - v_h) / dt,
+            )
+
+            if acceleration_lower > acceleration_upper:
+                raise ValueError(
+                    "Human speed cannot return to the grid within "
+                    "one time step while respecting acceleration limits."
+                )
+
             human_control = np.array([
-                best_human_control[0],
                 np.clip(
-                    best_human_control[1],
-                    (grid_lo[3] - v_h) / dt,
-                    (grid_hi[3] - v_h) / dt,
+                    yaw_command,
+                    human_input_min[0],
+                    human_input_max[0],
+                ),
+                np.clip(
+                    acceleration_command,
+                    acceleration_lower,
+                    acceleration_upper,
                 ),
             ])
+
             next_state = current_joint_state + np.asarray(
                 joint_dynamics(
                     jnp.asarray(current_joint_state),
-                    jnp.asarray(np.concatenate([ego_control, human_control])),
+                    jnp.asarray(
+                        np.concatenate([ego_control, human_control])
+                    ),
                 ),
                 dtype=float,
             ) * dt
-            next_state[3] = np.clip(next_state[3], grid_lo[4], grid_hi[4])
-            next_state[4] = np.clip(next_state[4], grid_lo[5], grid_hi[5])
-            next_state[8] = np.clip(next_state[8], grid_lo[3], grid_hi[3])
+
+            next_state[3] = np.clip(
+                next_state[3], grid_lo[4], grid_hi[4]
+            )
+            next_state[4] = np.clip(
+                next_state[4], grid_lo[5], grid_hi[5]
+            )
+            next_state[8] = np.clip(
+                next_state[8], grid_lo[3], grid_hi[3]
+            )
+
             brt_history.append(np.nan)
             terminal_history.append(np.nan)
             hamiltonian_history.append(np.nan)
@@ -365,6 +379,22 @@ def simulate_pursuit_evasion(
     ego_controls = np.asarray(ego_controls)
     human_controls = np.asarray(human_controls)
 
+    dv_dt_history = np.full_like(brt_history, np.nan)
+
+    valid_indices = np.flatnonzero(np.isfinite(brt_history))
+    valid_segments = np.split(
+        valid_indices,
+        np.flatnonzero(np.diff(valid_indices) > 1) + 1,
+    )
+
+    for segment in valid_segments:
+        if segment.size >= 2:
+            dv_dt_history[segment] = np.gradient(
+                brt_history[segment],
+                times[segment],
+                edge_order=2 if segment.size >= 3 else 1,
+            )
+
     recovery_starts = np.flatnonzero(
         (modes == "recovery")
         & np.concatenate(([True], modes[:-1] != "recovery"))
@@ -379,12 +409,16 @@ def simulate_pursuit_evasion(
             recovery_intervals.append((start, end))
             start = None
 
-    figure = plt.figure(figsize=(16, 11))
+    figure = plt.figure(figsize=(14, 9), dpi=80)
+    figure.suptitle(f"Metric: {metric}", fontsize=17, fontweight="semibold")
     layout = figure.add_gridspec(
-        5, 2, width_ratios=(1.35, 1.0), hspace=0.30, wspace=0.27
+        1, 2, width_ratios=(1.25, 1.0), wspace=0.32
     )
-    road = figure.add_subplot(layout[:, 0])
-    axes = [figure.add_subplot(layout[row, 1]) for row in range(5)]
+    left_layout = layout[0, 0].subgridspec(2, 1, hspace=0.38)
+    right_layout = layout[0, 1].subgridspec(5, 1, hspace=0.35)
+    road = figure.add_subplot(left_layout[0, 0])
+    relative_road = figure.add_subplot(left_layout[1, 0])
+    axes = [figure.add_subplot(right_layout[row, 0]) for row in range(5)]
     ego_acceleration_axis = axes[2].twinx()
     human_acceleration_axis = axes[3].twinx()
 
@@ -417,7 +451,7 @@ def simulate_pursuit_evasion(
     road.legend(loc="lower right")
     info = road.text(
         0.52, 1.015, "", transform=road.transAxes, va="bottom", ha="center",
-        fontsize=12, fontweight="semibold",
+        fontsize=10, fontweight="semibold",
         bbox=dict(boxstyle="round,pad=0.45", facecolor="white",
                   edgecolor="0.35", alpha=0.95),
     )
@@ -426,6 +460,7 @@ def simulate_pursuit_evasion(
         brt_history,
         terminal_history,
         hamiltonian_history,
+        dv_dt_history,
         np.rad2deg(ego_controls[:, 0]),
         ego_controls[:, 1],
         np.rad2deg(human_controls[:, 0]),
@@ -437,15 +472,16 @@ def simulate_pursuit_evasion(
         axes[0].plot([], [], label=r"$V(-3)$")[0],
         axes[0].plot([], [], label=r"$V(0)$")[0],
         axes[1].plot([], [], color="tab:purple", label="Hamiltonian")[0],
+        axes[1].plot([], [], color="tab:orange", linestyle="--", label="dV/dt")[0],
         axes[2].plot([], [], color="tab:green", label="steering rate")[0],
         ego_acceleration_axis.plot([], [], color="tab:red", label="acceleration")[0],
         axes[3].plot([], [], color="tab:brown", label="yaw rate")[0],
         human_acceleration_axis.plot([], [], color="tab:pink", label="acceleration")[0],
-        axes[4].plot([], [], label=r"$v_H$")[0],
-        axes[4].plot([], [], label=r"$v_E$")[0],
+        axes[4].plot([], [], color="tab:orange", label=r"$v_H$")[0],
+        axes[4].plot([], [], color="tab:blue", label=r"$v_E$")[0],
     ]
     value_axes = [
-        axes[0], axes[0], axes[1], axes[2], ego_acceleration_axis,
+        axes[0], axes[0], axes[1], axes[1], axes[2], ego_acceleration_axis,
         axes[3], human_acceleration_axis, axes[4], axes[4],
     ]
     axes[0].axhline(0, color="black", linestyle="--", linewidth=0.8)
@@ -477,6 +513,99 @@ def simulate_pursuit_evasion(
             axis.set_ylim(min(lower, finite.min() - padding),
                           max(upper, finite.max() + padding))
 
+    relative_states = np.empty((len(times), 6))
+    dx = human_x - ego_x
+    dy = human_y - ego_y
+    relative_states[:, 0] = np.cos(ego_heading) * dx + np.sin(ego_heading) * dy
+    relative_states[:, 1] = -np.sin(ego_heading) * dx + np.cos(ego_heading) * dy
+    relative_states[:, 2] = human_heading - ego_heading
+    relative_states[:, 3] = joint_states[:, 8]
+    relative_states[:, 4] = joint_states[:, 3]
+    relative_states[:, 5] = joint_states[:, 4]
+
+    coordinates = [np.asarray(axis) for axis in grid.coordinate_vectors]
+    relative_road.set(
+        xlim=(grid_lo[0], grid_hi[0]),
+        ylim=(grid_lo[1], grid_hi[1]),
+        xlabel=r"$x_{\mathrm{rel}}$ [m]",
+        ylabel=r"$y_{\mathrm{rel}}$ [m]",
+        title="Relative coordinates — Ego frame",
+    )
+    relative_road.set_aspect("equal", adjustable="box")
+    relative_road.grid(True, alpha=0.35)
+    relative_road.axhline(0, color="0.6", linewidth=0.6)
+    relative_road.axvline(0, color="0.6", linewidth=0.6)
+    relative_road.add_patch(plt.Rectangle(
+        (-4.68 / 2, -2.20 / 2), 4.68, 2.20,
+        facecolor="tab:blue", edgecolor="black", alpha=0.85, zorder=3,
+    ))
+    relative_human = relative_road.add_patch(plt.Rectangle(
+        (-4.28 / 2, -1.80 / 2), 4.28, 1.80,
+        facecolor="tab:orange", edgecolor="black", alpha=0.85, zorder=3,
+    ))
+    brt_contour = LineCollection(
+        [], colors="tab:red", linewidths=1.8, label="BRT = 0", zorder=2
+    )
+    relative_road.add_collection(brt_contour)
+    relative_road.legend(loc="upper right", fontsize=8)
+    relative_info = relative_road.text(
+        0.02, 0.02, "", transform=relative_road.transAxes,
+        fontsize=8, va="bottom",
+        bbox=dict(facecolor="white", edgecolor="none", alpha=0.85),
+    )
+
+    @jax.jit
+    def interpolate_xy(values, lower, upper, weights):
+        result = jnp.zeros(values.shape[:2], dtype=values.dtype)
+        for corner in product((0, 1), repeat=4):
+            indices = [upper[d] if corner[d] else lower[d] for d in range(4)]
+            weight = jnp.prod(jnp.where(jnp.asarray(corner), weights, 1 - weights))
+            result = result + weight * values[
+                :, :, indices[0], indices[1], indices[2], indices[3]
+            ]
+        return result
+
+    def contour_at(state):
+        lower, upper, weights = [], [], []
+        for dimension in range(2, 6):
+            value = state[dimension]
+            nodes = coordinates[dimension]
+            if not np.isfinite(value):
+                return [], "BRT slice unavailable"
+            if dimension in periodic_dims:
+                period = grid_hi[dimension] - grid_lo[dimension]
+                value = grid_lo[dimension] + (value - grid_lo[dimension]) % period
+                i = int(np.searchsorted(nodes, value, side="right") - 1)
+                i = max(0, i)
+                j = (i + 1) % len(nodes)
+                right = nodes[j] if j else nodes[0] + period
+            else:
+                if not grid_lo[dimension] <= value <= grid_hi[dimension]:
+                    return [], "BRT slice unavailable"
+                if len(nodes) == 1:
+                    lower.append(0)
+                    upper.append(0)
+                    weights.append(0.0)
+                    continue
+                i = int(np.clip(np.searchsorted(nodes, value) - 1, 0, len(nodes) - 2))
+                j = i + 1
+                right = nodes[j]
+            lower.append(i)
+            upper.append(j)
+            weights.append((value - nodes[i]) / (right - nodes[i]))
+
+        values = np.asarray(interpolate_xy(
+            brt_values, jnp.asarray(lower), jnp.asarray(upper),
+            jnp.asarray(weights, dtype=brt_values.dtype),
+        ))
+        paths = contourpy.contour_generator(
+            x=coordinates[0], y=coordinates[1], z=values.T,
+            line_type="Separate",
+        ).lines(0.0)
+        return paths, "" if paths else "No zero contour in this slice"
+
+    contour_cache = {}
+
     def render_frame(frame):
         ego_body.set_transform(
             transforms.Affine2D().rotate(ego_heading[frame])
@@ -486,6 +615,21 @@ def simulate_pursuit_evasion(
             transforms.Affine2D().rotate(human_heading[frame])
             .translate(human_x[frame], human_y[frame]) + road.transData
         )
+        state = relative_states[frame]
+        relative_human.set_transform(
+            transforms.Affine2D().rotate(state[2])
+            .translate(state[0], state[1]) + relative_road.transData
+        )
+        if frame not in contour_cache:
+            contour_cache[frame] = contour_at(state)
+        paths, message = contour_cache[frame]
+        brt_contour.set_segments(paths)
+        if not (
+            grid_lo[0] <= state[0] <= grid_hi[0]
+            and grid_lo[1] <= state[1] <= grid_hi[1]
+        ):
+            message = "Human outside XY view" + (f" · {message}" if message else "")
+        relative_info.set_text(message)
         upto = slice(0, frame + 1)
         ego_path.set_data(ego_x[upto], ego_y[upto])
         human_path.set_data(human_x[upto], human_y[upto])
@@ -498,24 +642,35 @@ def simulate_pursuit_evasion(
         v_zero_text = f"{v_zero:.4f}" if np.isfinite(v_zero) else "N/A"
         info.set_color("red" if mode == "RECOVERY" else "black")
         info.set_text(
-            f"Metric: {metric}    t = {times[frame]:.2f} s    V(-3) = {v_brt_text}    "
-            f"V(0) = {v_zero_text}    Mode = {mode}"
+            f"t = {times[frame]:.2f} s    Mode = {mode}\n"
+            f"V(-3) = {v_brt_text}    "
+            f"V(0) = {v_zero_text}"
         )
-        return ego_body, human_body, ego_path, human_path, info, *lines
+        return (ego_body, human_body, ego_path, human_path, info,
+                relative_human, brt_contour, relative_info, *lines)
 
+    frame_stride = 3
+    frame_indices = np.arange(0, len(times), frame_stride)
+    if frame_indices[-1] != len(times) - 1:
+        frame_indices = np.append(frame_indices, len(times) - 1)
     movie = animation.FuncAnimation(
         figure,
         render_frame,
-        frames=len(times),
-        interval=1000 * dt / animation_time_scale_factor,
+        frames=frame_indices,
+        interval=1000 * dt * frame_stride / animation_time_scale_factor,
         repeat=False,
         blit=False,
     )
     render_frame(0)
-    figure.tight_layout()
-    html = HTML(movie.to_html5_video())
-    plt.close(figure)
-    return html
-
+    figure.subplots_adjust(
+        left=0.07,
+        right=0.90,
+        bottom=0.08,
+        top=0.87,
+    )
+    try:
+        return HTML(movie.to_html5_video())
+    finally:
+        plt.close(figure)
 
 __all__ = ["simulate_pursuit_evasion"]
