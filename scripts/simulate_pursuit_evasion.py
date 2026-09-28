@@ -409,7 +409,7 @@ def simulate_pursuit_evasion(
             recovery_intervals.append((start, end))
             start = None
 
-    figure = plt.figure(figsize=(14, 9), dpi=80)
+    figure = plt.figure(figsize=(14, 9), dpi=60)
     figure.suptitle(f"Metric: {metric}", fontsize=17, fontweight="semibold")
     layout = figure.add_gridspec(
         1, 2, width_ratios=(1.25, 1.0), wspace=0.32
@@ -450,7 +450,7 @@ def simulate_pursuit_evasion(
     human_path, = road.plot([], [], color="tab:orange", label="Human")
     road.legend(loc="lower right")
     info = road.text(
-        0.52, 1.015, "", transform=road.transAxes, va="bottom", ha="center",
+        0.52, 1.08, "", transform=road.transAxes, va="bottom", ha="center",
         fontsize=10, fontweight="semibold",
         bbox=dict(boxstyle="round,pad=0.45", facecolor="white",
                   edgecolor="0.35", alpha=0.95),
@@ -649,7 +649,7 @@ def simulate_pursuit_evasion(
         return (ego_body, human_body, ego_path, human_path, info,
                 relative_human, brt_contour, relative_info, *lines)
 
-    frame_stride = 3
+    frame_stride = 4
     frame_indices = np.arange(0, len(times), frame_stride)
     if frame_indices[-1] != len(times) - 1:
         frame_indices = np.append(frame_indices, len(times) - 1)
