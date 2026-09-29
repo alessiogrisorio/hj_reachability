@@ -1,3 +1,15 @@
+"""Projected RSS with four rectangle axes and continuous Wang-style shaping.
+
+State order: (x_rel, y_rel, theta_rel, v_H, delta_E, v_E).
+V0 <= 0 denotes the unsafe set. Ego sideslip is ignored, so V0 is
+delta-invariant. This geometric extension is not certified unstructured RSS.
+
+For each unit axis n, m = abs(p @ n) - h(n) - b(n), where h is the
+combined rectangle support and b = abs(n_x)*d_long + abs(n_y)*d_lat.
+The axis value is n_x**2*m + 4*n_y**2*m**3. Its sign equals that of m;
+on ego axes this recovers Wang et al. (2020), Eq. (11).
+"""
+
 from dataclasses import dataclass
 from math import prod
 
@@ -28,8 +40,16 @@ def metricRSS(
     a_lat_max_accel: float = 0.68,
     a_lat_min_brake: float = 0.45,
     use_symmetry: bool = True,
+    use_four_axes: bool = True,
     dtype=np.float32,
 ) -> RSSMetricResult:
+    """Evaluate the grid using vectorized heading slices on CPU.
+
+    use_four_axes=False recovers the two-axis projected baseline with Wang
+    shaping. The output is a read-only broadcast view along delta_E; JAX
+    conversion materializes the full 6D array. No full state mesh is built.
+    Thresholds retain the previous front/behind and lateral tie policies.
+    """
 
     # Validation
     parameters = {
@@ -51,6 +71,8 @@ def metricRSS(
         raise ValueError("a_min_brake must not exceed a_max_brake")
     if not isinstance(use_symmetry, (bool, np.bool_)):
         raise ValueError("use_symmetry must be a boolean")
+    if not isinstance(use_four_axes, (bool, np.bool_)):
+        raise ValueError("use_four_axes must be a boolean")
     dtype = np.dtype(dtype)
     if dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
         raise ValueError("dtype must be float32 or float64")
@@ -69,8 +91,6 @@ def metricRSS(
     if np.any(vh < 0.0) or np.any(ve < 0.0):
         raise ValueError("v_H and v_E must be nonnegative")
 
-
-    ##
     values = np.empty((shape[0], shape[1], shape[2], shape[3], shape[5]), dtype=dtype)
 
     tolerance = 1e-6
@@ -102,6 +122,14 @@ def metricRSS(
     lateral_response_distance = a_lat_max_accel * rho**2
     evaluated_states = 0
     evaluated_headings = 0
+    extra_axis_evaluations = 0
+
+    # Reuse at most two 4D buffers; delta and theta are never expanded here.
+    if use_four_axes:
+        margin_buffer = np.empty(
+            (shape[0], shape[1], shape[3], shape[5]), dtype=np.float64
+        )
+        shaped_buffer = np.empty_like(margin_buffer)
 
     for it, angle in enumerate(theta):
         reflected_it = int(theta_reflection[it]) if symmetry_used else it
@@ -165,11 +193,45 @@ def metricRSS(
         safe_lat = mu + np.maximum(lateral_closure, 0.0)
         lat_margin = gap_y[:, None] - safe_lat
 
-        # Write the (Nx, Ny, NvH, NvE) maximum directly into the 5D result.
+        # Wang shaping on the two ego axes.
+        np.power(lat_margin, 3, out=lat_margin)
+        lat_margin *= 4.0
+        target = values[:, :ny, it, :, :]
         np.maximum(
-            long_margin[:, None, :, :], lat_margin[None, :, :, None],
-            out=values[:, :ny, it, :, :],
+            long_margin[:, None, :, :],
+            lat_margin[None, :, :, None],
+            out=target,
         )
+
+        # At multiples of pi/2, the human axes duplicate the ego axes.
+        if use_four_axes and cosine != 0.0 and sine != 0.0:
+            ac, asi = abs(cosine), abs(sine)
+            margin = margin_buffer[:, :ny, :, :]
+            shaped = shaped_buffer[:, :ny, :, :]
+            human_axes = (
+                (cosine, sine,
+                 human.half_length + ego.half_length * ac + ego.half_width * asi),
+                (-sine, cosine,
+                 human.half_width + ego.half_length * asi + ego.half_width * ac),
+            )
+            for nx, ny_axis, extent in human_axes:
+                gap = np.abs(x[:, None] * nx + selected_y[None, :] * ny_axis)
+                gap -= extent
+                np.subtract(
+                    gap[:, :, None, None],
+                    abs(nx) * safe_long[:, None, :, :],
+                    out=margin,
+                )
+                margin -= abs(ny_axis) * safe_lat[None, :, :, None]
+
+                # Strictly increasing, sign-preserving, and continuous in angle.
+                np.square(margin, out=shaped)
+                shaped *= 4.0 * ny_axis**2
+                shaped += nx**2
+                shaped *= margin
+                np.maximum(target, shaped, out=target)
+                extra_axis_evaluations += 1
+
         if symmetry_used:
             values[:, y_reflection[:ny], reflected_it, :, :] = values[:, :ny, it, :, :]
         evaluated_states += shape[0] * ny * shape[3] * shape[5]
@@ -179,7 +241,16 @@ def metricRSS(
     parameters.update({
         "ego_length": float(ego.length), "ego_width": float(ego.width),
         "human_length": float(human.length), "human_width": float(human.width),
-        "definition": "max(d_long - d_safe_long, d_lat - d_safe_lat)",
+        "definition": "max(axis_values)",
+        "axis_margin": "abs(p @ n) - h(n) - abs(n_x)*d_safe_long - abs(n_y)*d_safe_lat",
+        "axis_shaping": "n_x**2 * m + 4 * n_y**2 * m**3",
+        "terminal_shaping": "Wang et al. (2020), Eq. (11), on ego axes",
+        "use_four_axes": bool(use_four_axes),
+        "geometry": "four_rectangle_axes" if use_four_axes else "ego_axes",
+        "safety_model": "projected_rss_geometric_extension",
+        "unstructured_rss_certified": False,
+        "value_units": "shaped score, not a Euclidean distance",
+        "extra_axis_evaluations": extra_axis_evaluations,
         "lateral_threshold": "mu + max(predicted_closure, 0)",
         "coordinate_tie_policy": "larger threshold over both orderings",
         "diverging_longitudinal_threshold": 0.0,
