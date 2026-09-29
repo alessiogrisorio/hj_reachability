@@ -79,14 +79,7 @@ METRIC_PARAMETERS = {
         "use_symmetry": True,
     },
     "rss": {
-        "rho": 0.496,
-        "mu": 0.20,
-        "a_max_accel": 2.5,
-        "a_min_brake": 7.0,
-        "a_max_brake": 7.0,
-        "a_lat_max_accel": 0.68,
-        "a_lat_min_brake": 0.45,
-        "use_symmetry": True,
+        "transition_width_cells": 3.0,
     },   
 }
 
@@ -234,9 +227,7 @@ def build_grid() -> hj.Grid:
 def print_grid_information(grid: hj.Grid) -> None:
     """Print grid size and resolution."""
 
-    spacing = (
-        GRID_HI - GRID_LO
-    ) / (np.asarray(GRID_SHAPE) - 1)
+    spacing = np.asarray([float(value) for value in grid.spacings])
 
     total_points = int(np.prod(GRID_SHAPE))
 
@@ -260,15 +251,16 @@ def print_grid_information(grid: hj.Grid) -> None:
 
 
 def create_metadata(
+    grid: hj.Grid,
     dynamics: RelativeVehicle6D,
     brt: np.ndarray,
     gradients: np.ndarray,
 ) -> dict:
     """Create metadata describing the complete BRT calculation."""
 
-    grid_spacing = (
-        GRID_HI - GRID_LO
-    ) / (np.asarray(GRID_SHAPE) - 1)
+    grid_spacing = np.asarray(
+        [float(value) for value in grid.spacings]
+    )
 
     return {
         "created_at": datetime.now().astimezone().isoformat(),
@@ -429,17 +421,25 @@ if __name__ == "__main__":
     if METRIC_NAME == "rss":
         parameters = metric_result.parameters
 
-        print(f"RSS response time: {parameters['rho']:.6f} s")
-        print(f"RSS lateral margin: {parameters['mu']:.6f} m")
+        print(f"RSS source: {parameters['source']}")
+        print(f"RSS mask: {parameters['mask_file']}")
         print(
-            "RSS minimum longitudinal braking: "
-            f"{parameters['a_min_brake']:.6f} m/s²"
-        )
-        print(f"Symmetry used: {parameters['symmetry_used']}")
-        print(
-            "Evaluated states: "
-            f"{parameters['evaluated_states']:,} / "
+            "RSS unsafe states: "
+            f"{parameters['unsafe_states']:,} / "
             f"{parameters['total_states']:,}"
+        )
+        print(
+            "RSS safe states: "
+            f"{parameters['safe_states']:,} / "
+            f"{parameters['total_states']:,}"
+        )
+        print(
+            "RSS transition width: "
+            f"{parameters['transition_width_cells']:.2f} cells"
+        )
+        print(
+            "RSS distance definition: "
+            f"{parameters['distance_definition']}"
         )
 
     if tuple(V0.shape) != tuple(grid.shape):
@@ -557,6 +557,7 @@ if __name__ == "__main__":
     ]
 
     metadata = create_metadata(
+        grid=grid,
         dynamics=dynamics,
         brt=BRT_save,
         gradients=gradients_save,
@@ -601,14 +602,15 @@ if __name__ == "__main__":
         metadata["metric"].update({
             "implementation_parameters": metric_result.parameters,
             "terminal_value_definition": (
-                "V0 = max(d_long - d_safe_long, d_lat - d_safe_lat)"
+                "V0 = clip(d_signed / transition_width_cells, -1, 1)"
             ),
             "unsafe_set_definition": (
-                "Both projected separations are at or below "
-                "their RSS thresholds"
+                "Intel ad-rss-lib Unstructured RSS unsafe classification"
             ),
-            "model": "RSS projected onto the ego axes",
-            "delta_invariant_terminal_value": True,
+            "model": "Intel ad-rss-lib Unstructured RSS",
+            "sign_convention": "V0 <= 0 unsafe",
+            "delta_invariant_terminal_value": False,
+            "theta_periodic": True,
         })
 
     metadata_json = json.dumps(

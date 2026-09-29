@@ -1,0 +1,5 @@
+shape=30,17,48,8,11,8
+order=x_rel,y_rel,theta_rel,v_H,delta_E,v_E
+dtype=uint8
+unsafe=1
+safe=0
