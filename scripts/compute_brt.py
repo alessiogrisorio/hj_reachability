@@ -587,7 +587,7 @@ if __name__ == "__main__":
             ].shape
         )
 
-    if METRIC_NAME == "eggert":
+    if METRIC_NAME in {"eggert", "time_eggert"}:
         metadata["metric"]["implementation_parameters"] = (
             metric_result.parameters
         )
@@ -628,6 +628,35 @@ if __name__ == "__main__":
             "sign_convention": "V0 <= 0 unsafe",
             "delta_invariant_terminal_value": False,
             "theta_periodic": True,
+        })
+
+    if METRIC_NAME == "time_eggert":
+        metadata["metric"].update({
+            "implementation_parameters": metric_result.parameters,
+            "terminal_value_definition": (
+                "Signed nominal first-entry time into the opposite "
+                "rolling-risk class; zero at P_H = p_crit; "
+                "saturated at +/- time_max"
+            ),
+            "unsafe_set_definition": "P_H >= p_crit",
+            "probability_definition": (
+                "Eggert probability over horizon, reset at each "
+                "nominally propagated state"
+            ),
+            "nominal_prediction": (
+                "Constant v_H, v_E and delta_E; zero human yaw rate"
+            ),
+            "regularization": "none",
+        })
+
+        metadata["arrays"].update({
+            "V0_units": "s",
+            "P_H_shape": list(additional_metric_arrays["P_H"].shape),
+            "first_contact_time_shape": list(
+                additional_metric_arrays["first_contact_time"].shape
+            ),
+            "first_contact_time_units": "s",
+            "first_contact_time_no_contact_value": "+inf",
         })
 
     metadata_json = json.dumps(

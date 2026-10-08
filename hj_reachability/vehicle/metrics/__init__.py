@@ -5,6 +5,7 @@ from .ttc import TTCMetricResult, metricTTC
 from .dce import DCEMetricResult, metricDCE
 from .eggert import EggertMetricResult, metricEggert
 from .rss import RSSMetricResult, metricRSS
+from .time_eggert import TimeEggertMetricResult, metricTimeEggert
 
 __all__ = [
     "EuclideanMetricResult",
@@ -12,11 +13,11 @@ __all__ = [
     "DCEMetricResult",
     "EggertMetricResult",
     "RSSMetricResult",
-    "TimeEggertMetricResult"
+    "TimeEggertMetricResult",
     "metricEuclidean",
     "metricTTC",
     "metricDCE",
     "metricEggert",
     "metricRSS",
-    "metricTimeEggert"
+    "metricTimeEggert",
 ]
