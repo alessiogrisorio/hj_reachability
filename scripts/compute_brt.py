@@ -25,6 +25,7 @@ from hj_reachability.vehicle.metrics import (
     metricEggert,
     metricRSS,
     metricTimeEggert,
+    metricSFF,
 )
 
 #---- Configuration ----#
@@ -44,8 +45,8 @@ TARGET_TIME = -3.0
 SOLVER_ACCURACY = "very_high"
 
 # Scelta della metrica
-# euclidean, ttc, dce, eggert, rss, time_eggert
-METRIC_NAME = "time_eggert"
+# euclidean, ttc, dce, eggert, rss, time_eggert, sff
+METRIC_NAME = "sff"
 
 METRIC_PARAMETERS = {
     "euclidean": {
@@ -91,6 +92,15 @@ METRIC_PARAMETERS = {
         "time_tolerance": 0.01,
         "backend": "interpolated",
     }, 
+    "sff": {
+        "dt": 0.01,
+        "ego_braking": 7.0,
+        "human_braking": 7.0,
+        "ego_reaction_time": 0.0,
+        "human_reaction_time": 0.0,
+        "threads": 0,
+        "use_symmetry": True,
+    },
 }
 
 GRID_LO = np.array(
@@ -222,6 +232,9 @@ def compute_terminal_metric(
             dynamics=dynamics,
             **parameters,
         )
+
+    if METRIC_NAME == "sff":
+        return metricSFF(grid=grid, dynamics=dynamics, **parameters)
 
     raise RuntimeError(
         f"Metric configuration not implemented: "
@@ -459,6 +472,17 @@ if __name__ == "__main__":
             f"{parameters['distance_definition']}"
         )
 
+    if METRIC_NAME == "sff":
+        parameters = metric_result.parameters
+        print("SFF-based signed XY distance: metres")
+        print(f"SFF time step: {parameters['dt']:.6f} s")
+        print(f"Native V0 computation: {parameters['native_compute_seconds']:.3f} s")
+        print(f"Threads used: {parameters['threads_used']}")
+        print(f"Symmetry used: {parameters['symmetry_used']}")
+        print(f"Evaluated kinematic groups: {parameters['evaluated_groups']:,} / "
+              f"{parameters['total_groups']:,}")
+        print(f"Maximum time samples: {parameters['max_time_samples']}")
+
     if tuple(V0.shape) != tuple(grid.shape):
         raise ValueError(
             "V0 shape does not match the grid shape: "
@@ -658,6 +682,24 @@ if __name__ == "__main__":
             "first_contact_time_units": "s",
             "first_contact_time_no_contact_value": "+inf",
         })
+
+    if METRIC_NAME == "sff":
+        metadata["metric"].update({
+            "implementation_parameters": metric_result.parameters,
+            "terminal_value_definition": (
+                "Signed Euclidean XY distance to the entire sampled "
+                "stopping-procedure conflict union, holding theta_rel, "
+                "v_H, delta_E and v_E fixed"
+            ),
+            "unsafe_set_definition": (
+                "Equal-time occupied rectangles intersect during "
+                "the specified stopping procedures"
+            ),
+            "model": "SFF-based spatial metric; not NVIDIA's original potential",
+            "sign_convention": "V0 <= 0 unsafe",
+            "regularization": "none",
+        })
+        metadata["arrays"].update({"V0_units": "m", "BRT_units": "m"})
 
     metadata_json = json.dumps(
         metadata,

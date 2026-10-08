@@ -6,6 +6,7 @@ from .dce import DCEMetricResult, metricDCE
 from .eggert import EggertMetricResult, metricEggert
 from .rss import RSSMetricResult, metricRSS
 from .time_eggert import TimeEggertMetricResult, metricTimeEggert
+from .sff import SFFMetricResult, metricSFF, sffDistanceXY
 
 __all__ = [
     "EuclideanMetricResult",
@@ -14,10 +15,13 @@ __all__ = [
     "EggertMetricResult",
     "RSSMetricResult",
     "TimeEggertMetricResult",
+    "SFFMetricResult",
     "metricEuclidean",
     "metricTTC",
     "metricDCE",
     "metricEggert",
     "metricRSS",
     "metricTimeEggert",
+    "metricSFF",
+    "sffDistanceXY",
 ]
