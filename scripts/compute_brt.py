@@ -557,7 +557,7 @@ if __name__ == "__main__":
             )
         )
 
-    if METRIC_NAME == "eggert":
+    if METRIC_NAME in {"eggert", "time_eggert"}:
         additional_metric_arrays["P_H"] = np.asarray(
             metric_result.probability,
             dtype=np.float32,
@@ -587,7 +587,7 @@ if __name__ == "__main__":
             ].shape
         )
 
-    if METRIC_NAME in {"eggert", "time_eggert"}:
+    if METRIC_NAME == "eggert":
         metadata["metric"]["implementation_parameters"] = (
             metric_result.parameters
         )
