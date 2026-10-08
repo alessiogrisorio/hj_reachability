@@ -24,6 +24,7 @@ from hj_reachability.vehicle.metrics import (
     metricDCE,
     metricEggert,
     metricRSS,
+    metricTimeEggert,
 )
 
 #---- Configuration ----#
@@ -43,8 +44,8 @@ TARGET_TIME = -3.0
 SOLVER_ACCURACY = "very_high"
 
 # Scelta della metrica
-# euclidean, ttc, dce, eggert, rss
-METRIC_NAME = "rss"
+# euclidean, ttc, dce, eggert, rss, time_eggert
+METRIC_NAME = "time_eggert"
 
 METRIC_PARAMETERS = {
     "euclidean": {
@@ -80,7 +81,16 @@ METRIC_PARAMETERS = {
     },
     "rss": {
         "transition_width_cells": 3.0,
-    },   
+    },
+    "time_eggert": {
+        "horizon": 3.0,
+        "time_max": 3.0,
+        "p_crit": 0.7,
+        "dt": 0.05,
+        "search_dt": 0.05,
+        "time_tolerance": 0.01,
+        "backend": "interpolated",
+    }, 
 }
 
 GRID_LO = np.array(
@@ -203,6 +213,13 @@ def compute_terminal_metric(
     if METRIC_NAME == "rss":
         return metricRSS(
             grid=grid,
+            **parameters,
+        )
+
+    if METRIC_NAME == "time_eggert":
+        return metricTimeEggert(
+            grid=grid,
+            dynamics=dynamics,
             **parameters,
         )
 

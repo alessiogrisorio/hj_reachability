@@ -12,9 +12,11 @@ __all__ = [
     "DCEMetricResult",
     "EggertMetricResult",
     "RSSMetricResult",
+    "TimeEggertMetricResult"
     "metricEuclidean",
     "metricTTC",
     "metricDCE",
     "metricEggert",
     "metricRSS",
+    "metricTimeEggert"
 ]
