@@ -26,6 +26,7 @@ from hj_reachability.vehicle.metrics import (
     metricRSS,
     metricTimeEggert,
     metricSFF,
+    metricLongLat,
 )
 
 #---- Configuration ----#
@@ -45,10 +46,17 @@ TARGET_TIME = -3.0
 SOLVER_ACCURACY = "very_high"
 
 # Scelta della metrica
-# euclidean, ttc, dce, eggert, rss, time_eggert, sff
-METRIC_NAME = "sff"
+# euclidean, ttc, dce, eggert, rss, time_eggert, sff, long_lat
+METRIC_NAME = "long_lat"
 
 METRIC_PARAMETERS = {
+    "long_lat": {
+        "horizon": 3.0,
+        "dt": 0.05,
+        "buffer": 0.0,
+        "threads": 0,
+        "use_symmetry": True,
+    },
     "euclidean": {
         "n_theta": 90,
         "n_phi": 180,
@@ -235,6 +243,9 @@ def compute_terminal_metric(
 
     if METRIC_NAME == "sff":
         return metricSFF(grid=grid, dynamics=dynamics, **parameters)
+
+    if METRIC_NAME == "long_lat":
+        return metricLongLat(grid=grid, dynamics=dynamics, **parameters)
 
     raise RuntimeError(
         f"Metric configuration not implemented: "
@@ -483,6 +494,17 @@ if __name__ == "__main__":
               f"{parameters['total_groups']:,}")
         print(f"Maximum time samples: {parameters['max_time_samples']}")
 
+    if METRIC_NAME == "long_lat":
+        parameters = metric_result.parameters
+        print("Long/lat sampled manoeuvre clearance: metres")
+        print(f"Native V0 computation: {parameters['native_compute_seconds']:.3f} s")
+        print(f"Symmetry used: {parameters['symmetry_used']}")
+        print(f"Evaluated groups: {parameters['evaluated_groups']:,} / "
+              f"{parameters['total_groups']:,}")
+        print(f"Time samples per manoeuvre: {parameters['time_samples']}")
+        print(f"Steering bounds: [{parameters['delta_min']:.6f}, "
+              f"{parameters['delta_max']:.6f}] rad")
+
     if tuple(V0.shape) != tuple(grid.shape):
         raise ValueError(
             "V0 shape does not match the grid shape: "
@@ -592,6 +614,12 @@ if __name__ == "__main__":
             dtype=np.float32,
         )
 
+    if METRIC_NAME == "long_lat":
+        additional_metric_arrays["V0_long"] = np.asarray(
+            metric_result.longitudinal, dtype=np.float32)
+        additional_metric_arrays["V0_lat"] = np.asarray(
+            metric_result.lateral, dtype=np.float32)
+
     coordinate_vectors = [
         np.asarray(vector, dtype=np.float32)
         for vector in grid.coordinate_vectors
@@ -700,6 +728,22 @@ if __name__ == "__main__":
             "regularization": "none",
         })
         metadata["arrays"].update({"V0_units": "m", "BRT_units": "m"})
+
+    if METRIC_NAME == "long_lat":
+        metadata["metric"].update({
+            "implementation_parameters": metric_result.parameters,
+            "terminal_value_definition": "V0 = min(V0_long, V0_lat)",
+            "unsafe_set_definition": (
+                "Maximum braking or both maximum steering manoeuvres "
+                "violate the clearance buffer at a sampled time"
+            ),
+            "sign_convention": "V0 <= 0 unsafe",
+        })
+        metadata["arrays"].update({
+            "V0_units": "m", "BRT_units": "m",
+            "V0_long_shape": list(additional_metric_arrays["V0_long"].shape),
+            "V0_lat_shape": list(additional_metric_arrays["V0_lat"].shape),
+        })
 
     metadata_json = json.dumps(
         metadata,

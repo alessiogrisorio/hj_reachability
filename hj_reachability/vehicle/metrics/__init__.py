@@ -7,6 +7,7 @@ from .eggert import EggertMetricResult, metricEggert
 from .rss import RSSMetricResult, metricRSS
 from .time_eggert import TimeEggertMetricResult, metricTimeEggert
 from .sff import SFFMetricResult, metricSFF, sffDistanceXY
+from .long_lat import LongLatMetricResult, metricLongLat, longLatDistanceXY
 
 __all__ = [
     "EuclideanMetricResult",
@@ -16,6 +17,7 @@ __all__ = [
     "RSSMetricResult",
     "TimeEggertMetricResult",
     "SFFMetricResult",
+    "LongLatMetricResult",
     "metricEuclidean",
     "metricTTC",
     "metricDCE",
@@ -24,4 +26,6 @@ __all__ = [
     "metricTimeEggert",
     "metricSFF",
     "sffDistanceXY",
+    "metricLongLat",
+    "longLatDistanceXY",
 ]
