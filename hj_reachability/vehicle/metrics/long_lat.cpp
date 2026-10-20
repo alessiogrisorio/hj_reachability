@@ -200,7 +200,8 @@ Values evaluate(double x,double y,const Plans& plan,const LLConfig& p) {
     const double left=minimum_clearance(x,y,plan[1],p);
     const double right=minimum_clearance(x,y,plan[2],p);
     const double lateral=std::max(left,right);
-    return {std::min(longitudinal,lateral),longitudinal,lateral};
+    // return {std::min(longitudinal,lateral),longitudinal,lateral};
+    return {lateral,longitudinal,lateral};
 }
 struct Axis { const double* a; std::size_t n; };
 struct Grid {
