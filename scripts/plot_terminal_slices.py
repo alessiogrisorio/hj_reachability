@@ -1,5 +1,4 @@
-"""Mosaico 3x3 di V0: righe v_H, colonne v_E.
-
+"""Mosaico 3x3 di V0 o BRT: righe v_H, colonne v_E.
 Dipendenze: numpy, scipy, matplotlib.
 Esecuzione: python plot_terminal_slices.py
 Percorsi relativi riferiti alla cartella dello script; output nella stessa cartella.
@@ -7,7 +6,6 @@ Lo smoothing modifica solo le fette visualizzate, senza modificare il file NPZ.
 """
 from pathlib import Path
 import warnings
-
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize, TwoSlopeNorm
@@ -15,35 +13,45 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import gaussian_filter
-
 # ---------------- Configurazione ----------------
-METRIC = "eggert"  # Nome del file NPZ senza estensione; anche btn, stn, ecc.
+METRICS = (
+    "euclidean",
+    "dce",
+    "btn",
+    "stn",
+    "long_lat",
+    "ttc",
+    "time_eggert",
+    "rss",
+    "eggert",
+)
 DATA_DIRECTORY = Path("../results/brt")  # Se lo script e in scripts/
-INPUT_FILE = None  # Percorso esplicito opzionale, prevale su DATA_DIRECTORY e METRIC
-FIELD_KEY = "V0"  # Anche V0_long o V0_lat, se presenti nel file
-OUTPUT_FILE = "eggert_v0_slices.pdf"  # Estensione libera: .pdf, .png, .svg, ecc.
-
-V_E_VALUES = (2.0, 6.0, 10.0)  # Colonne, da sinistra a destra
-V_H_VALUES = (2.0, 6.0, 10.0)  # Righe, dall'alto in basso
+INPUT_FILE = None  # Percorso opzionale, utilizzabile con una sola metrica
+FIELD_KEY = "BRT"  # Anche V0_long o V0_lat, se presenti nel file
+OUTPUT_DIRECTORY = Path(".")  # Relativa allo script; PDF: <metrica>_<campo>_slices.pdf
+SHOW_V0_CONTOUR = True  # Attivo solo quando FIELD_KEY = "BRT"
+V0_COLOR = "#287a32"
+V0_LINESTYLE = "--"
+V0_LINEWIDTH = 1.4
+V_E_VALUES = (4.0, 6.0, 10.0)  # Colonne, da sinistra a destra
+V_H_VALUES = (4.0, 6.0, 10.0)  # Righe, dall'alto in basso
 THETA_REL = 0.0  # Radianti
 DELTA_E = 0.0  # Radianti
-
 X_LIMITS = None  # None: intero dominio; oppure (min, max)
 Y_LIMITS = None
 REFINEMENT = 6
 SMOOTHING_SIGMA = 0.8  # Celle raffinate; 0 disattiva lo smoothing
 COLORBAR_TICK_STEP = 1.0
+MAX_COLORBAR_TICKS = 9
 COLORMAP = "RdBu_r"
 ZERO_COLOR = "black"
 ZERO_LINEWIDTH = 1.0
 FIGURE_SIZE = (10.2, 5.5)
 DPI = 350
-SHOW_FIGURE = True
+SHOW_FIGURE = False  # True: mostra tutte le figure alla fine del batch
 # ------------------------------------------------
-
 BASE = Path(__file__).resolve().parent
 STATE_NAMES = ("x_rel", "y_rel", "theta_rel", "v_H", "delta_E", "v_E")
-
 
 def bracket(axis, value, name, periodic=False):
     if not np.isfinite(value):
@@ -61,7 +69,6 @@ def bracket(axis, value, name, periodic=False):
     low = int(np.clip(np.searchsorted(axis, value, side="right") - 1, 0, len(axis) - 2))
     return low, low + 1, float((value - axis[low]) / (axis[low + 1] - axis[low]))
 
-
 def extract_slice(field, axes, v_h, v_e):
     result = field
     # Ordine decrescente per mantenere invariati gli indici delle dimensioni.
@@ -73,9 +80,8 @@ def extract_slice(field, axes, v_h, v_e):
         raise ValueError(f"Fetta v_H={v_h:g}, v_E={v_e:g} con NaN o infiniti.")
     return np.asarray(result, dtype=float)
 
-
-def load_data():
-    path = Path(INPUT_FILE).expanduser() if INPUT_FILE else Path(DATA_DIRECTORY).expanduser() / f"{METRIC}.npz"
+def load_data(metric):
+    path = Path(INPUT_FILE).expanduser() if INPUT_FILE else Path(DATA_DIRECTORY).expanduser() / f"{metric}.npz"
     if not path.is_absolute():
         path = BASE / path
     if not path.is_file():
@@ -92,16 +98,39 @@ def load_data():
         field = data[FIELD_KEY]
         if field.shape != tuple(len(a) for a in axes):
             raise ValueError(f"Forma del campo incompatibile con gli assi: {field.shape}")
+        terminal = None
+        target_time = None
+        if FIELD_KEY == "BRT":
+            if "target_time" not in data:
+                raise KeyError("target_time assente nel file BRT.")
+            target_time = float(data["target_time"])
+            if not np.isfinite(target_time):
+                raise ValueError("target_time non finito.")
+            if SHOW_V0_CONTOUR:
+                if "V0" not in data:
+                    raise KeyError("V0 assente: impossibile sovrapporre il terminal set.")
+                terminal = data["V0"]
+                if terminal.shape != field.shape:
+                    raise ValueError("V0 e BRT devono avere la stessa forma.")
     print(f"Input: {path}\nCampo: {FIELD_KEY}; theta_rel={THETA_REL:g}, delta_E={DELTA_E:g} rad")
-    return axes, field
+    return axes, field, terminal, target_time
 
-
-def make_figure():
+def make_figure(metric):
     if len(V_E_VALUES) != 3 or len(V_H_VALUES) != 3:
         raise ValueError("Specificare tre velocita ego e tre velocita human.")
     if int(REFINEMENT) != REFINEMENT or REFINEMENT < 1 or SMOOTHING_SIGMA < 0:
         raise ValueError("REFINEMENT deve essere intero >= 1; SMOOTHING_SIGMA >= 0.")
-    axes, field = load_data()
+    if not np.isfinite(COLORBAR_TICK_STEP) or COLORBAR_TICK_STEP <= 0:
+        raise ValueError("COLORBAR_TICK_STEP deve essere positivo e finito.")
+    if MAX_COLORBAR_TICKS < 3:
+        raise ValueError("MAX_COLORBAR_TICKS deve essere almeno 3.")
+    axes, field, terminal, target_time = load_data(metric)
+    if FIELD_KEY == "BRT":
+        field_label = rf"V({target_time:g},\mathbf{{x}}_R)"
+    elif FIELD_KEY == "V0":
+        field_label = r"V_0(\mathbf{x}_R)"
+    else:
+        field_label = FIELD_KEY.replace("_", r"\_")
     x, y = axes[:2]
     if min(len(x), len(y)) < 2:
         raise ValueError("Servono almeno due nodi per ciascun asse spaziale.")
@@ -120,6 +149,7 @@ def make_figure():
     rx, ry = np.meshgrid(xr, yr, indexing="ij")
     render_points = np.stack((rx, ry), axis=-1)
     slices = []
+    terminal_slices = []
     for row, v_h in enumerate(V_H_VALUES):
         for column, v_e in enumerate(V_E_VALUES):
             original = extract_slice(field, axes, v_h, v_e)
@@ -128,6 +158,16 @@ def make_figure():
                 fine = gaussian_filter(fine, sigma=SMOOTHING_SIGMA, mode="nearest")
             plotted = RegularGridInterpolator((xf, yf), fine)(render_points)
             slices.append(plotted)
+            if terminal is not None:
+                initial = extract_slice(terminal, axes, v_h, v_e)
+                fine_initial = RegularGridInterpolator((x, y), initial)(points)
+                if SMOOTHING_SIGMA:
+                    fine_initial = gaussian_filter(
+                        fine_initial, sigma=SMOOTHING_SIGMA, mode="nearest"
+                    )
+                terminal_slices.append(
+                    RegularGridInterpolator((xf, yf), fine_initial)(render_points)
+                )
             print(f"Riga {row+1}, colonna {column+1}: v_H={v_h:g}, v_E={v_e:g}, "
                   f"range=[{plotted.min():.6g}, {plotted.max():.6g}]")
     vmin = min(float(s.min()) for s in slices)
@@ -145,10 +185,15 @@ def make_figure():
         Patch(facecolor="lightcyan", edgecolor="#263746", linewidth=1.4,
               linestyle="--", label="Ego vehicle"),
         Line2D([0], [0], color=ZERO_COLOR, linewidth=ZERO_LINEWIDTH,
-               label=r"$V_0=0$"),
+               label=rf"${field_label}=0$"),
     ]
+    if terminal is not None:
+        handles.append(Line2D(
+            [0], [0], color=V0_COLOR, linewidth=V0_LINEWIDTH,
+            linestyle=V0_LINESTYLE, label=r"$V_0(\mathbf{x}_R)=0$"
+        ))
     fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 1.005),
-               ncol=2, frameon=False, fontsize=13, handlelength=2.5, columnspacing=2.5)
+               ncol=len(handles), frameon=False, fontsize=13, handlelength=2.5, columnspacing=2.0)
     for index, (ax, values) in enumerate(zip(panels.flat, slices)):
         row, column = divmod(index, 3)
         image = ax.pcolormesh(xr, yr, values.T, shading="gouraud", cmap=COLORMAP,
@@ -158,6 +203,18 @@ def make_figure():
                        linewidths=ZERO_LINEWIDTH)
         else:
             warnings.warn(f"Nessun attraversamento di zero nella fetta ({row+1}, {column+1}).")
+        if terminal is not None:
+            initial = terminal_slices[index]
+            if initial.min() < 0 < initial.max():
+                ax.contour(
+                    xr, yr, initial.T, levels=[0], colors=V0_COLOR,
+                    linewidths=V0_LINEWIDTH, linestyles=V0_LINESTYLE,
+                    zorder=4,
+                )
+            else:
+                warnings.warn(
+                    f"V0: nessun attraversamento di zero nella fetta ({row+1}, {column+1})."
+                )
         ego = plt.Rectangle(
             (-4.68 / 2, -2.20 / 2), 4.68, 2.20,
             facecolor="lightcyan", edgecolor="#263746",
@@ -184,27 +241,47 @@ def make_figure():
     top = panels[0, 2].get_position().y1
     cax = fig.add_axes((0.875, bottom, 0.022, top - bottom))
     bar = fig.colorbar(image, cax=cax)
-    bar.ax.set_yscale("linear")
-    step = COLORBAR_TICK_STEP
-    if not np.isfinite(step) or step <= 0:
-        raise ValueError("COLORBAR_TICK_STEP deve essere positivo e finito.")
-    ticks = np.arange(np.ceil(vmin / step), np.floor(vmax / step) + 1) * step
+    if vmin < 0 < vmax:
+        negative_ticks = np.linspace(vmin, 0.0, 5)
+        positive_ticks = np.linspace(0.0, vmax, 5)[1:]
+        ticks = np.concatenate((negative_ticks, positive_ticks))
+    else:
+        ticks = np.linspace(vmin, vmax, 7)
+
     bar.set_ticks(ticks)
-    bar.set_ticklabels([f"{v:g}" for v in ticks])
-    bar.set_label(r"$V_0(\mathbf{x}_R)$", labelpad=9)
+    bar.set_ticklabels([f"{value:.3g}" for value in ticks])
+    bar.set_label(rf"${field_label}$", labelpad=9)
     bar.ax.tick_params(labelsize=12)
-    output = BASE / Path(OUTPUT_FILE).name
-    if not output.suffix:
-        raise ValueError("OUTPUT_FILE deve includere un'estensione, ad esempio .pdf.")
+    folder = Path(OUTPUT_DIRECTORY).expanduser()
+    if not folder.is_absolute():
+        folder = BASE / folder
+    folder.mkdir(parents=True, exist_ok=True)
+    output = folder / f"{metric}_{FIELD_KEY.lower()}_slices.pdf"
     fig.savefig(output, dpi=DPI, bbox_inches="tight", pad_inches=0.08)
     print(f"Colorbar comune: [{vmin:.6g}, {vmax:.6g}]\nExport: {output}")
     print(f"Smoothing solo grafico: sigma={SMOOTHING_SIGMA:g} celle raffinate.")
-    if SHOW_FIGURE:
-        plt.show()
-    else:
+    if not SHOW_FIGURE:
         plt.close(fig)
     return output
 
 
+
+def main():
+    if isinstance(METRICS, str) or not METRICS:
+        raise ValueError('METRICS deve essere una lista o tupla, es.: ("euclidean",).')
+    if len(set(METRICS)) != len(METRICS):
+        raise ValueError("METRICS contiene nomi duplicati.")
+    if INPUT_FILE is not None and len(METRICS) != 1:
+        raise ValueError("INPUT_FILE puo essere usato solo con una singola metrica.")
+    outputs = []
+    for index, metric in enumerate(METRICS, start=1):
+        print(f"\n[{index}/{len(METRICS)}] {metric} - {FIELD_KEY}", flush=True)
+        outputs.append(make_figure(metric))
+    print(f"\nGenerati {len(outputs)} PDF.")
+    if SHOW_FIGURE:
+        plt.show()
+    return outputs
+
+
 if __name__ == "__main__":
-    make_figure()
+    main()

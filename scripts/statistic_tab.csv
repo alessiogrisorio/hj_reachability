@@ -1,0 +1,10 @@
+Metric,UnsafeVzero,UnsafeBRT,Ratio
+Euclidean,8.97,20.21,2.25
+DCE,19.31,22.06,1.14
+BTN,20.04,23.61,1.18
+STN,20.88,23.74,1.14
+min(BTN;STN),23.69,27.06,1.14
+TTC,8.97,18.04,2.01
+Time Eggert,24.02,26.90,1.12
+RSS,31.79,35.63,1.12
+Eggert,19.44,20.30,1.04

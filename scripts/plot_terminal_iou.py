@@ -27,8 +27,8 @@ METRICS = (
     {"file": "rss.npz", "label": "RSS"},
     {"file": "eggert.npz", "label": "Eggert"},
 )
-FIELD_KEY = "V0"  # "V0": terminal set; "BRT": insieme dopo propagazione HJ
-OUTPUT_FILE = "terminal_sets_iou.pdf"  # Anche .png, .svg, ecc.
+FIELD_KEY = "BRT"  # "V0": terminal set; "BRT": insieme dopo propagazione HJ
+OUTPUT_FILE = "brt_iou.pdf"  # Anche .png, .svg, ecc.
 DECIMALS = 2
 COLORMAP = "Blues"
 FIGURE_SIZE = None  # None: dimensioni automatiche; oppure (9.0, 7.8)

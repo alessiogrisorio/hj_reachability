@@ -1,5 +1,4 @@
 """Due superfici zero 3D e tre confronti XY a v_H fisso.
-
 Dipendenze: numpy scipy matplotlib scikit-image.
 Eseguire: python scripts/compare_terminal_values.py
 I percorsi relativi sono riferiti allo script. Nessun calcolo BRT viene eseguito.
@@ -7,7 +6,6 @@ Interpolazione e smoothing riguardano solo la visualizzazione.
 """
 from pathlib import Path
 import warnings
-
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LightSource
@@ -17,25 +15,38 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import gaussian_filter
 from skimage.measure import marching_cubes
-
 # ---------------- Configurazione ----------------
 DATA_DIRECTORY = Path("../results/brt")
-# file: percorso assoluto o relativo a DATA_DIRECTORY; key: campo nel NPZ.
-METRICS = (
-    {"file": "euclidean.npz", "label": "Euclidean", "key": "V0"},
-    {"file": "long_lat.npz", "label": "min(BTN,STN)", "key": "V0"},
+# Scegli uno o entrambi i campi: ("V0",), ("BRT",), ("V0", "BRT").
+FIELD_KEYS = ("BRT",)
+
+# Ogni coppia genera una figura separata. L'ordine determina colori e legenda.
+PAIRS = (
+    #("euclidean", "dce"),
+    #("btn", "stn"),
+    #("euclidean", "long_lat"),
+    #("ttc", "time_eggert"),
+    #("rss", "eggert"),
+    ("btn", "long_lat"),
+    ("stn", "long_lat")
 )
-OUTPUT_FILE = "euclidean_vs_long_lat_v0.pdf"  # Esportato accanto allo script
+LABELS = {
+    "euclidean": "Euclidean", "dce": "DCE",
+    "btn": "BTN", "stn": "STN", "long_lat": "min(BTN,STN)",
+    "ttc": "TTC", "time_eggert": "Time Eggert",
+    "rss": "RSS", "eggert": "Eggert",
+}
+OUTPUT_DIRECTORY = Path(".")  # Relativa alla cartella dello script.
+OUTPUT_FORMAT = "pdf"
 
 V_H = 6.0
 DELTA_E = 0.0  # rad
 V_E_3D = 6.0
 V_E_SLICES = (2.0, 6.0, 10.0)  # Dall'alto in basso
-THETA_SLICE = 0.0  # rad, fissato per le tre slice XY
+THETA_SLICE = 0.0 # rad, fissato per le tre slice XY
 THETA_LIMITS_3D = (-np.pi / 2, np.pi / 2)  # None: intero periodo
 X_LIMITS = None  # None: dominio comune alle due metriche
 Y_LIMITS = None
-
 COLORMAP = "RdBu_r"
 COLOR_POSITIONS = (0.12, 0.88)
 SURFACE_ALPHA = 0.35
@@ -52,12 +63,10 @@ ELEVATION = 22
 AZIMUTH = -120
 FIGURE_SIZE = (11.5, 7.0)
 DPI = 350
-SHOW_FIGURE = True
+SHOW_FIGURE = False
 # ------------------------------------------------
-
 BASE = Path(__file__).resolve().parent
 NAMES = ("x_rel", "y_rel", "theta_rel", "v_H", "delta_E", "v_E")
-
 
 def bracket(axis, value, name, periodic=False):
     if not np.isfinite(value):
@@ -73,7 +82,6 @@ def bracket(axis, value, name, periodic=False):
         return 0, 0, 0.0
     lo = int(np.clip(np.searchsorted(axis, value, side="right")-1, 0, len(axis)-2))
     return lo, lo+1, float((value-axis[lo])/(axis[lo+1]-axis[lo]))
-
 
 def load_metric(config):
     folder = Path(DATA_DIRECTORY).expanduser()
@@ -95,11 +103,14 @@ def load_metric(config):
         if key not in data:
             raise KeyError(f"{path.name}: campo {key} assente. Disponibili: {data.files}")
         field = data[key]
+        if key == "BRT":
+            config["target_time"] = float(data["target_time"])
+            if not np.isfinite(config["target_time"]):
+                raise ValueError(f"{path.name}: target_time non valido.")
         if field.shape != tuple(len(a) for a in axes):
             raise ValueError(f"Forma incompatibile in {path.name}: {field.shape}")
     print(f"{config['label']}: {path} [{key}]")
     return axes, field
-
 
 def fixed_slice(axes, field, v_e, xy=False):
     values = field
@@ -114,12 +125,10 @@ def fixed_slice(axes, field, v_e, xy=False):
         raise ValueError("Fetta con NaN o infiniti.")
     return np.asarray(values, dtype=float)
 
-
 def fine_axis(axis, refinement):
     if len(axis)<2:
         raise ValueError("Almeno due nodi per ogni asse visualizzato.")
     return np.linspace(axis[0], axis[-1], (len(axis)-1)*refinement+1)
-
 
 def plot_surface(ax, axes, field, color, label, limits):
     x, y, theta = axes[:3]
@@ -163,7 +172,6 @@ def plot_surface(ax, axes, field, color, label, limits):
                for edge in (0,-1)):
             warnings.warn(f"{label}: superficie zero tagliata al bordo {NAMES[dim]}.")
 
-
 def plot_contour(ax, axes, field, color, style, label, v_e, limits):
     x, y = axes[:2]
     values = fixed_slice(axes, field, v_e, xy=True)
@@ -182,16 +190,24 @@ def plot_contour(ax, axes, field, color, style, label, v_e, limits):
     else:
         warnings.warn(f"{label}: nessun attraversamento zero nella slice v_E={v_e:g}.")
 
-
-def make_figure():
-    if len(METRICS)!=2 or len(V_E_SLICES)!=3:
+def make_figure(pair, key):
+    metrics = [{"file": f"{name}.npz", "label": LABELS[name], "key": key}
+               for name in pair]
+    if len(metrics)!=2 or len(V_E_SLICES)!=3:
         raise ValueError("Specificare due metriche e tre velocita ego.")
     if not 0<SURFACE_ALPHA<=1 or SMOOTHING_SIGMA<0:
         raise ValueError("Richiesti 0 < SURFACE_ALPHA <= 1 e SMOOTHING_SIGMA >= 0.")
     for refinement in (SURFACE_REFINEMENT, SLICE_REFINEMENT):
         if refinement<1 or int(refinement)!=refinement:
             raise ValueError("I raffinamenti devono essere interi positivi.")
-    datasets = [load_metric(c) for c in METRICS]
+    datasets = [load_metric(c) for c in metrics]
+    if key == "BRT":
+        first_time, second_time = [c["target_time"] for c in metrics]
+        if not np.isclose(first_time, second_time, rtol=0, atol=1e-7):
+            raise ValueError("Le due metriche hanno orizzonti BRT diversi.")
+        zero_label = rf"$V({first_time:g},\mathbf{{x}}_R)=0$"
+    else:
+        zero_label = r"$V_0=0$"
     limits = []
     for dim, requested in enumerate((X_LIMITS,Y_LIMITS)):
         lo=max(a[dim][0] for a,_ in datasets)
@@ -211,7 +227,7 @@ def make_figure():
     grid = fig.add_gridspec(3,2, width_ratios=(1.75,1), left=0.10, right=0.91,
                             bottom=0.12, top=0.88, wspace=0.22, hspace=0.24)
     spatial = fig.add_subplot(grid[:,0], projection="3d")
-    for dataset,color,config in zip(datasets, colors, METRICS):
+    for dataset,color,config in zip(datasets, colors, metrics):
         plot_surface(spatial, *dataset, color, config["label"], limits)
     spatial.set_xlabel(r"$x_{\mathrm{rel}}\ [\mathrm{m}]$", labelpad=9)
     spatial.set_ylabel(r"$y_{\mathrm{rel}}\ [\mathrm{m}]$", labelpad=9)
@@ -233,7 +249,7 @@ def make_figure():
         ax=fig.add_subplot(grid[row,1], sharex=panels[0] if panels else None,
                            sharey=panels[0] if panels else None)
         panels.append(ax)
-        for dataset,color,config,style in zip(datasets, colors, METRICS, CONTOUR_STYLES):
+        for dataset,color,config,style in zip(datasets, colors, metrics, CONTOUR_STYLES):
             plot_contour(ax, *dataset, color, style, config["label"], v_e, limits)
         ax.add_patch(plt.Rectangle((-EGO_LENGTH/2,-EGO_WIDTH/2), EGO_LENGTH,EGO_WIDTH,
                                    facecolor=EGO_FACE,edgecolor=EGO_EDGE,
@@ -257,8 +273,8 @@ def make_figure():
         fontsize=13,
     )
     handles=[Line2D([0],[0],color=c,linewidth=CONTOUR_LINEWIDTH,linestyle=s,
-                    label=cfg["label"]+r" ($V_0=0$)")
-             for c,s,cfg in zip(colors,CONTOUR_STYLES,METRICS)]
+                    label=cfg["label"]+" ("+zero_label+")")
+             for c,s,cfg in zip(colors,CONTOUR_STYLES,metrics)]
     handles.append(Patch(facecolor=EGO_FACE,edgecolor=EGO_EDGE,linestyle="--",label="Ego vehicle"))
     fig.legend(handles=handles,loc="upper center",bbox_to_anchor=(0.5,0.99),
                ncol=3,frameon=False,handlelength=2.5,columnspacing=2)
@@ -269,19 +285,42 @@ def make_figure():
         transform=spatial.transAxes,
         ha="center",
     )
-    output=BASE / Path(OUTPUT_FILE).name
-    if not output.suffix:
-        raise ValueError("OUTPUT_FILE deve includere l'estensione.")
+    folder = Path(OUTPUT_DIRECTORY).expanduser()
+    if not folder.is_absolute():
+        folder = BASE / folder
+    folder.mkdir(parents=True, exist_ok=True)
+    output = folder / f"{pair[0]}_vs_{pair[1]}_{key.lower()}.{OUTPUT_FORMAT}"
     fig.savefig(output,dpi=DPI,bbox_inches="tight",pad_inches=0.1,
                 bbox_extra_artists=fig.get_default_bbox_extra_artists() + [spatial.zaxis.label])
     print(f"v_H={V_H:g}; delta_E={DELTA_E:g} rad; theta slice={THETA_SLICE:g} rad")
     print(f"Export: {output}\nSmoothing solo grafico: {SMOOTHING_SIGMA:g} celle raffinate.")
-    if SHOW_FIGURE:
-        plt.show()
-    else:
+    if not SHOW_FIGURE:
         plt.close(fig)
     return output
 
+def main():
+    if not FIELD_KEYS or any(key not in ("V0", "BRT") for key in FIELD_KEYS):
+        raise ValueError('FIELD_KEYS deve contenere "V0" e/o "BRT".')
+    if len(set(FIELD_KEYS)) != len(FIELD_KEYS):
+        raise ValueError("FIELD_KEYS contiene duplicati.")
+    if not PAIRS or any(len(pair) != 2 for pair in PAIRS):
+        raise ValueError("Specificare almeno una coppia di metriche.")
+    if len(set(tuple(pair) for pair in PAIRS)) != len(PAIRS):
+        raise ValueError("PAIRS contiene coppie duplicate.")
+    for pair in PAIRS:
+        for name in pair:
+            if name not in LABELS:
+                raise ValueError(f"Metrica sconosciuta: {name}. Disponibili: {tuple(LABELS)}")
+    if OUTPUT_FORMAT not in ("pdf", "png", "svg"):
+        raise ValueError('OUTPUT_FORMAT deve essere "pdf", "png" o "svg".')
+    outputs = []
+    for key in FIELD_KEYS:
+        for pair in PAIRS:
+            outputs.append(make_figure(pair, key))
+    if SHOW_FIGURE:
+        plt.show()
+    return outputs
+
 
 if __name__ == "__main__":
-    make_figure()
+    main()
