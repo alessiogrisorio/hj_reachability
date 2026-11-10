@@ -18,22 +18,22 @@ from skimage.measure import marching_cubes
 # ---------------- Configurazione ----------------
 DATA_DIRECTORY = Path("../results/brt")
 # Scegli uno o entrambi i campi: ("V0",), ("BRT",), ("V0", "BRT").
-FIELD_KEYS = ("BRT",)
+FIELD_KEYS = ("V0",)
 
 # Ogni coppia genera una figura separata. L'ordine determina colori e legenda.
 PAIRS = (
     #("euclidean", "dce"),
     #("btn", "stn"),
     #("euclidean", "long_lat"),
-    #("ttc", "time_eggert"),
+    ("ttc", "time_eggert"),
     #("rss", "eggert"),
-    ("btn", "long_lat"),
-    ("stn", "long_lat")
+    #("btn", "long_lat"),
+    #("stn", "long_lat")
 )
 LABELS = {
     "euclidean": "Euclidean", "dce": "DCE",
     "btn": "BTN", "stn": "STN", "long_lat": "min(BTN,STN)",
-    "ttc": "TTC", "time_eggert": "Time Eggert",
+    "ttc": "TTC", "time_eggert": "TBR",
     "rss": "RSS", "eggert": "Eggert",
 }
 OUTPUT_DIRECTORY = Path(".")  # Relativa alla cartella dello script.
