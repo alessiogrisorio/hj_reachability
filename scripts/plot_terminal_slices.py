@@ -273,7 +273,7 @@ def make_mosaic(
     ticks = (np.r_[np.linspace(vmin, 0, 5), np.linspace(0, vmax, 5)[1:]]
              if vmin < 0 < vmax else np.linspace(vmin, vmax, 7))
     bar.set_ticks(ticks, labels=[f"{t:.2f}" for t in ticks])
-    bar.set_label(rf"${field_label}$", labelpad=9)
+    bar.set_label(rf"${field_label}$", rotation=270, labelpad=15, va="bottom")
     format_colorbars(fig)
     return fig
 

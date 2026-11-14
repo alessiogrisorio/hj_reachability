@@ -70,4 +70,5 @@ def finish_figure(fig):
             ax.yaxis.label.set_rotation(270)
             ax.yaxis.label.set_verticalalignment("top")
             ax.yaxis.label.set_horizontalalignment("center")
+            ax.yaxis.labelpad = 10
     return fig
