@@ -102,12 +102,18 @@ def export_figure(
 
     destinazione.mkdir(parents=True, exist_ok=True)
 
+    extra_artists = list(fig.get_default_bbox_extra_artists())
+    extra_artists.extend(
+        ax.zaxis.label for ax in fig.axes
+        if getattr(ax, "name", None) == "3d"
+    )
     for formato, percorso in zip(formati, percorsi):
         fig.savefig(
             percorso,
             format=formato,
             dpi=dpi,
             bbox_inches="tight" if ritaglia else None,
+            bbox_extra_artists=extra_artists if ritaglia else None,
             pad_inches=0.08,
         )
         print(f"Salvato: {percorso}")

@@ -195,7 +195,7 @@ def plot_contour(ax, axes, field, color, style, label, v_e, limits, theta_rel=0.
     else:
         warnings.warn(f"{label}: nessun attraversamento zero nella slice v_E={v_e:g}.")
 
-def make_figure(pair, key):
+def make_figure(pair, key, *, save=True, return_figure=False):
     metrics = [{"file": f"{name}.npz", "label": LABELS[name], "key": key}
                for name in pair]
     if len(metrics)!=2 or len(THETA_SLICES)!=3:
@@ -229,8 +229,8 @@ def make_figure(pair, key):
     plt.rcParams.update({"font.family":"serif", "mathtext.fontset":"cm", "font.size":13,
                          "axes.labelsize":14, "pdf.fonttype":42, "ps.fonttype":42})
     colors = [plt.get_cmap(COLORMAP)(p) for p in COLOR_POSITIONS]
-    fig = plt.figure(figsize=FIGURE_SIZE)
-    grid = fig.add_gridspec(3,2, width_ratios=(1.75,1), left=0.10, right=0.91,
+    fig = plt.figure(figsize=FIGURE_SIZE, layout="none")
+    grid = fig.add_gridspec(3,2, width_ratios=(1.75,1), left=0.16, right=0.91,
                             bottom=0.12, top=0.88, wspace=0.22, hspace=0.24)
     spatial = fig.add_subplot(grid[:,0], projection="3d")
     for dataset,color,config in zip(datasets, colors, metrics):
@@ -278,13 +278,18 @@ def make_figure(pair, key):
     folder = Path(OUTPUT_DIRECTORY).expanduser()
     if not folder.is_absolute():
         folder = BASE / folder
-    folder.mkdir(parents=True, exist_ok=True)
+    if save:
+        folder.mkdir(parents=True, exist_ok=True)
     output = folder / f"{pair[0]}_vs_{pair[1]}_{key.lower()}.{OUTPUT_FORMAT}"
     finish_figure(fig)
-    fig.savefig(output,dpi=DPI,bbox_inches="tight",pad_inches=0.1,
-                bbox_extra_artists=fig.get_default_bbox_extra_artists() + [spatial.zaxis.label])
+    if save:
+        fig.savefig(output,dpi=DPI,bbox_inches="tight",pad_inches=0.1,
+                    bbox_extra_artists=fig.get_default_bbox_extra_artists() + [spatial.zaxis.label])
     print(f"v_H={V_H:g}; delta_E={DELTA_E:g} rad; theta slices={THETA_SLICES}")
-    print(f"Export: {output}\nSmoothing solo grafico: {SMOOTHING_SIGMA:g} celle raffinate.")
+    if save:
+        print(f"Export: {output}\nSmoothing solo grafico: {SMOOTHING_SIGMA:g} celle raffinate.")
+    if return_figure:
+        return fig
     if not SHOW_FIGURE:
         plt.close(fig)
     return output

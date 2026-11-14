@@ -3,6 +3,7 @@ from fractions import Fraction
 
 import numpy as np
 from matplotlib.ticker import FormatStrFormatter
+from matplotlib.layout_engine import PlaceHolderLayoutEngine
 
 METRIC_LABELS = {
     "euclidean": "Euclidean", "dce": "DCE", "btn": "BTN", "stn": "STN",
@@ -51,6 +52,12 @@ def finish_figure(fig):
     Richiamare prima di show per l'anteprima; export_figure lo richiama anche
     prima del salvataggio. Non cambia vista, dati, dimensioni o testi fissi.
     """
+    # Un layout manuale deve restare manuale anche dopo gli export successivi.
+    # Ripristinare None durante savefig riattiverebbe il default constrained.
+    if fig.get_layout_engine() is None:
+        fig.set_layout_engine(PlaceHolderLayoutEngine(
+            adjust_compatible=True, colorbar_gridspec=False,
+        ))
     format_colorbars(fig)
     spatial = [ax for ax in fig.axes if getattr(ax, "name", None) == "3d"]
     if not spatial:
