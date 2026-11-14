@@ -1,6 +1,12 @@
 from pathlib import Path
 
 import matplotlib as mpl
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from scripts.plotting_common import finish_figure
 
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
@@ -71,6 +77,7 @@ def export_figure(
     if not formati:
         raise ValueError("Specifica almeno un formato.")
 
+    finish_figure(fig)
     supportati = fig.canvas.get_supported_filetypes()
     for formato in formati:
         if formato not in supportati:

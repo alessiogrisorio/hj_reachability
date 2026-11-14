@@ -12,6 +12,10 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import gaussian_filter
 from skimage.measure import marching_cubes
+try:
+    from .plotting_common import orient_3d_labels, finish_figure
+except ImportError:
+    from plotting_common import orient_3d_labels, finish_figure
 
 # ---------------- Configurazione ----------------
 METRICS = (
@@ -32,7 +36,8 @@ OUTPUT_DIRECTORY = Path(".")  # Relativa allo script; PDF: <metrica>_<key>.pdf
 V_E = 6.0
 V_H = 6.0
 DELTA_E = 0.0  # Radianti
-THETA_LIMITS = (-np.pi / 2, np.pi / 2)  # None: intero periodo
+THETA_LIMITS = (-np.pi / 2, np.pi / 2)  # Vista V0. I BRT usano BRT_THETA_LIMITS.
+BRT_THETA_LIMITS = (-np.pi, np.pi)
 X_LIMITS = None  # None: dominio completo; oppure (min, max)
 Y_LIMITS = None
 SURFACE_REFINEMENT = 4
@@ -110,7 +115,7 @@ def prepare_domain(axes, field):
     theta_ext = np.concatenate((theta - period, theta, theta + period))
     field_ext = np.concatenate((field, field, field), axis=2)
     limits = [X_LIMITS or (x[0], x[-1]), Y_LIMITS or (y[0], y[-1]),
-              THETA_LIMITS or (theta[0], theta[0] + period)]
+              (BRT_THETA_LIMITS if KEY == "BRT" else THETA_LIMITS) or (theta[0], theta[0] + period)]
     for axis, (lo, hi), name in zip((x, y, theta_ext), limits, STATE_NAMES):
         if hi <= lo or lo < axis[0] - 1e-7 or hi > axis[-1] + 1e-7:
             raise ValueError(f"Limiti non validi per {name}: {(lo, hi)}")
@@ -134,10 +139,7 @@ def configure_axis(ax, limits):
         axis.pane.set_edgecolor("white")
         axis._axinfo["grid"]["color"] = (0.78, 0.78, 0.78, 1)
         axis._axinfo["grid"]["linewidth"] = 0.5
-    ax.figure.canvas.draw()
-    angle = ax.zaxis.label.get_rotation()
-    ax.zaxis.set_rotate_label(False)
-    ax.zaxis.label.set_rotation((angle + 180) % 360)
+    orient_3d_labels(ax)
 
 def make_figure(metric):
     axes, field, label = load_slice(metric)
@@ -209,6 +211,7 @@ def make_figure(metric):
         folder = BASE / folder
     folder.mkdir(parents=True, exist_ok=True)
     destination = folder / f"{metric}_{KEY.lower()}.pdf"
+    finish_figure(fig)
     fig.savefig(destination, dpi=DPI, bbox_inches="tight", pad_inches=0.08)
     print(f"Export: {destination}\nSmoothing: sigma={SURFACE_SMOOTHING:g} celle raffinate (solo grafica).")
     if not SHOW_FIGURE:

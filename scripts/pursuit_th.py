@@ -26,6 +26,10 @@ from matplotlib.offsetbox import AnnotationBbox, DrawingArea, HPacker
 from matplotlib.text import Text
 from matplotlib.patches import Patch, Rectangle
 from scipy.ndimage import gaussian_filter1d
+try:
+    from .plotting_common import METRIC_LABELS, format_colorbars
+except ImportError:
+    from plotting_common import METRIC_LABELS, format_colorbars
 
 # ---------------- Configuration ----------------
 DATA_DIRECTORY = Path("../results/brt")
@@ -45,7 +49,11 @@ OUTPUT_ROOT = Path(".")  # Creates pursuit_euclidean, pursuit_dce, etc. here.
 SIMULATION_TIME = 5.0       # s; independent of the saved BRT horizon.
 SIMULATION_FREQUENCY = 30.0  # Hz
 ANIMATION_FREQUENCY = 2.0    # frames per simulated second; multipage frame.pdf.
-FONT_SIZE = 15
+FONT_SIZE = 19
+# Solo rigenerazione dei plot salvati: nessuna nuova simulazione.
+REPLOT_ONLY = True
+REPLOT_FOLDERS = ("pursuit_euclidean_pos", "pursuit_rss_neg")
+FIRST_NEGATIVE_BODY_ALPHA = 0.20
 
 # Absolute states; headings and steering angle in radians.
 EGO_INITIAL_STATE = np.array([0.0, 0.0, 0.0, 0.0, 7.0])  # x,y,psi,delta,v
@@ -295,15 +303,17 @@ def configure_style():
     plt.rcParams.update({"font.family": "serif", "mathtext.fontset": "cm",
                          "font.size": FONT_SIZE, "axes.labelsize": FONT_SIZE,
                          "axes.titlesize": FONT_SIZE + 1, "legend.fontsize": FONT_SIZE - 1,
+                         "xtick.labelsize": FONT_SIZE - 1, "ytick.labelsize": FONT_SIZE - 1,
                          "pdf.fonttype": 42, "ps.fonttype": 42,
                          "axes.spines.top": False, "axes.spines.right": False})
 
 
 def title(metric):
-    return f"metric={metric}"
+    return METRIC_LABELS.get(metric, metric)
 
 
 def save(fig, folder, name):
+    format_colorbars(fig)
     fig.savefig(folder / name, dpi=DPI, bbox_inches="tight", pad_inches=0.15)
     plt.close(fig)
 
@@ -342,8 +352,8 @@ def vehicle_handles():
 def plot_trajectory(result, metric, folder):
     t, states = result["time"], result["states"]
     fig = plt.figure(figsize=(9.2, 6.0), layout="constrained")
-    grid = fig.add_gridspec(1, 3, width_ratios=(1, 0.035, 0.035), wspace=0.08)
-    ax, cax, rax = [fig.add_subplot(grid[0, i]) for i in range(3)]
+    grid = fig.add_gridspec(1, 2, width_ratios=(1, 0.035), wspace=0.08)
+    ax, cax = [fig.add_subplot(grid[0, i]) for i in range(2)]
     norm = colors.Normalize(0, t[-1])
     for offset in (0, 5):
         points = states[:, offset:offset + 2]
@@ -358,6 +368,14 @@ def plot_trajectory(result, metric, folder):
     negative = np.flatnonzero(np.isfinite(result["v0"]) & (result["v0"] < 0))
     if len(negative):
         z = states[negative[0]]
+        for offset, length, width, color in (
+            (0, EGO_LENGTH, EGO_WIDTH, EGO_COLOR),
+            (5, HUMAN_LENGTH, HUMAN_WIDTH, HUMAN_COLOR),
+        ):
+            silhouette = body(ax, z[offset], z[offset + 1], z[offset + 2],
+                              length, width, color)
+            silhouette.set_alpha(FIRST_NEGATIVE_BODY_ALPHA)
+            silhouette.set_zorder(6)
         ax.plot([z[0], z[5]], [z[1], z[6]], linestyle="none", marker="*",
                 color="red", markersize=12, markeredgecolor="darkred", zorder=8)
         handles.append(Line2D([], [], marker="*", linestyle="none", color="red",
@@ -370,38 +388,6 @@ def plot_trajectory(result, metric, folder):
     bar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=TIME_COLORMAP), cax=cax)
     cax.set_title("t", pad=10)
     bar.set_label("[s]")
-    # Red opacity identifies recovery. Soft edges are visual only.
-    vertical_time = np.linspace(0, t[-1], 1200)
-    sampled = np.clip(np.searchsorted(t, vertical_time, side="right") - 1, 0, len(t) - 1)
-    opacity = gaussian_filter1d(result["recovery"][sampled].astype(float), 1.0)
-    rgba = np.ones((len(vertical_time), 1, 4))
-    rgba[:, :, 1:3] = 0
-    rgba[:, 0, 3] = 0.5 * opacity
-    rax.imshow(rgba, extent=(0, 1, 0, t[-1]), origin="lower", aspect="auto",
-               interpolation="nearest")
-    rax.set(ylim=(0, t[-1]), xticks=[], yticks=[])
-    rax.set_title("recovery", pad=40)
-    boxes = []
-    for label, facecolor in (("on", "#ff8080"), ("off", "white")):
-        box = DrawingArea(22, 22, 0, 0)
-        box.add_artist(Rectangle(
-            (1, 1), 20, 20, facecolor=facecolor,
-            edgecolor="0.65", linewidth=0.7,
-        ))
-        box.add_artist(Text(
-            x=11, y=11, text=label, ha="center", va="center",
-            fontsize=FONT_SIZE - 2, color="black",
-        ))
-        boxes.append(box)
-    legend = HPacker(children=boxes, align="center", pad=0, sep=4)
-    rax.add_artist(AnnotationBbox(
-        legend, xy=(0.5, 1.01), xycoords="axes fraction",
-        box_alignment=(0.5, 0), frameon=False, annotation_clip=False,
-    ))
-    for spine in rax.spines.values():
-        spine.set_visible(True)
-        spine.set_color("0.75")
-    # Both bars use precisely the same physical height and time direction.
     save(fig, folder, "trajectory.pdf")
 
 
@@ -534,7 +520,28 @@ def run_metric(metric):
     return folder
 
 
+def replot_saved(folder):
+    folder = resolve(folder)
+    with np.load(folder / "simulation.npz", allow_pickle=False) as data:
+        result = {name: data[name] for name in (
+            "time", "states", "v0", "brt", "recovery",
+        )}
+        config = json.loads(str(data["configuration_json"].item()))
+    for name, key in (("EGO_LENGTH", "ego_length"), ("EGO_WIDTH", "ego_width"),
+                      ("HUMAN_LENGTH", "human_length"), ("HUMAN_WIDTH", "human_width")):
+        if key in config and not np.isclose(config[key], globals()[name]):
+            raise ValueError(f"Geometria salvata differente: {key}")
+    configure_style()
+    metric = config["metric"]
+    plot_trajectory(result, metric, folder)
+    plot_values(result, metric, folder)
+    print(f"Rigenerati trajectory.pdf, brt.pdf, v0.pdf, values.pdf in {folder}")
+    return folder
+
+
 def main():
+    if REPLOT_ONLY:
+        return [replot_saved(folder) for folder in REPLOT_FOLDERS]
     if isinstance(METRICS, str) or not METRICS:
         raise ValueError('METRICS must be a nonempty sequence, e.g. ("euclidean", "dce").')
     if any(not isinstance(metric, str) or not metric

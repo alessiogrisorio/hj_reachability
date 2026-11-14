@@ -1,4 +1,4 @@
-"""Due superfici zero 3D e tre confronti XY a v_H fisso.
+"""Due superfici zero 3D e tre confronti XY a velocita fisse e theta_rel variabile.
 Dipendenze: numpy scipy matplotlib scikit-image.
 Eseguire: python scripts/compare_terminal_values.py
 I percorsi relativi sono riferiti allo script. Nessun calcolo BRT viene eseguito.
@@ -15,6 +15,10 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import gaussian_filter
 from skimage.measure import marching_cubes
+try:
+    from .plotting_common import angle_label, finish_figure
+except ImportError:
+    from plotting_common import angle_label, finish_figure
 # ---------------- Configurazione ----------------
 DATA_DIRECTORY = Path("../results/brt")
 # Scegli uno o entrambi i campi: ("V0",), ("BRT",), ("V0", "BRT").
@@ -42,9 +46,10 @@ OUTPUT_FORMAT = "pdf"
 V_H = 6.0
 DELTA_E = 0.0  # rad
 V_E_3D = 6.0
-V_E_SLICES = (2.0, 6.0, 10.0)  # Dall'alto in basso
-THETA_SLICE = 0.0 # rad, fissato per le tre slice XY
-THETA_LIMITS_3D = (-np.pi / 2, np.pi / 2)  # None: intero periodo
+V_E_SLICE = 6.0  # Velocita Ego fissa nelle tre slice XY.
+THETA_SLICES = (0.0, np.pi / 6, np.pi / 3)  # Righe; modificabile dai notebook.
+THETA_LIMITS_3D = (-np.pi / 2, np.pi / 2)  # V0
+BRT_THETA_LIMITS_3D = (-np.pi, np.pi)
 X_LIMITS = None  # None: dominio comune alle due metriche
 Y_LIMITS = None
 COLORMAP = "RdBu_r"
@@ -112,11 +117,11 @@ def load_metric(config):
     print(f"{config['label']}: {path} [{key}]")
     return axes, field
 
-def fixed_slice(axes, field, v_e, xy=False):
+def fixed_slice(axes, field, v_e, xy=False, theta_rel=0.0):
     values = field
     fixed = [(5, v_e), (4, DELTA_E), (3, V_H)]
     if xy:
-        fixed.append((2, THETA_SLICE))
+        fixed.append((2, theta_rel))
     for dim, value in fixed:
         lo, hi, w = bracket(axes[dim], value, NAMES[dim], periodic=(dim==2))
         values = ((1-w)*np.take(values, lo, axis=dim)
@@ -172,9 +177,9 @@ def plot_surface(ax, axes, field, color, label, limits):
                for edge in (0,-1)):
             warnings.warn(f"{label}: superficie zero tagliata al bordo {NAMES[dim]}.")
 
-def plot_contour(ax, axes, field, color, style, label, v_e, limits):
+def plot_contour(ax, axes, field, color, style, label, v_e, limits, theta_rel=0.0):
     x, y = axes[:2]
-    values = fixed_slice(axes, field, v_e, xy=True)
+    values = fixed_slice(axes, field, v_e, xy=True, theta_rel=theta_rel)
     xf, yf = [fine_axis(a, SLICE_REFINEMENT) for a in (x,y)]
     query = np.stack(np.meshgrid(xf, yf, indexing="ij"), axis=-1)
     fine = RegularGridInterpolator((x,y), values)(query)
@@ -193,8 +198,8 @@ def plot_contour(ax, axes, field, color, style, label, v_e, limits):
 def make_figure(pair, key):
     metrics = [{"file": f"{name}.npz", "label": LABELS[name], "key": key}
                for name in pair]
-    if len(metrics)!=2 or len(V_E_SLICES)!=3:
-        raise ValueError("Specificare due metriche e tre velocita ego.")
+    if len(metrics)!=2 or len(THETA_SLICES)!=3:
+        raise ValueError("Specificare due metriche e tre angoli relativi.")
     if not 0<SURFACE_ALPHA<=1 or SMOOTHING_SIGMA<0:
         raise ValueError("Richiesti 0 < SURFACE_ALPHA <= 1 e SMOOTHING_SIGMA >= 0.")
     for refinement in (SURFACE_REFINEMENT, SLICE_REFINEMENT):
@@ -216,7 +221,8 @@ def make_figure(pair, key):
         if chosen[0]<lo or chosen[1]>hi or chosen[0]>=chosen[1]:
             raise ValueError(f"Limiti {NAMES[dim]} fuori dal dominio comune [{lo},{hi}].")
         limits.append(chosen)
-    theta_limits = THETA_LIMITS_3D if THETA_LIMITS_3D is not None else (-np.pi,np.pi)
+    requested_theta = BRT_THETA_LIMITS_3D if key == "BRT" else THETA_LIMITS_3D
+    theta_limits = requested_theta if requested_theta is not None else (-np.pi, np.pi)
     if theta_limits[0]>=theta_limits[1] or theta_limits[1]-theta_limits[0]>2*np.pi+1e-7:
         raise ValueError("Specificare un intervallo angolare positivo lungo al massimo 2pi.")
     limits.append(theta_limits)
@@ -245,12 +251,13 @@ def make_figure(pair, key):
         axis.pane.fill=False
         axis._axinfo["grid"]["color"]=(0.78,0.78,0.78,1)
     panels=[]
-    for row,v_e in enumerate(V_E_SLICES):
+    for row,theta_rel in enumerate(THETA_SLICES):
+        v_e = V_E_SLICE
         ax=fig.add_subplot(grid[row,1], sharex=panels[0] if panels else None,
                            sharey=panels[0] if panels else None)
         panels.append(ax)
         for dataset,color,config,style in zip(datasets, colors, metrics, CONTOUR_STYLES):
-            plot_contour(ax, *dataset, color, style, config["label"], v_e, limits)
+            plot_contour(ax, *dataset, color, style, config["label"], v_e, limits, theta_rel=theta_rel)
         ax.add_patch(plt.Rectangle((-EGO_LENGTH/2,-EGO_WIDTH/2), EGO_LENGTH,EGO_WIDTH,
                                    facecolor=EGO_FACE,edgecolor=EGO_EDGE,
                                    linewidth=1.4,linestyle="--",zorder=5))
@@ -258,41 +265,25 @@ def make_figure(pair, key):
         ax.set_aspect("equal",adjustable="box")
         ax.set_ylabel(r"$y_{\mathrm{rel}}\ [\mathrm{m}]$")
         ax.tick_params(labelsize=12, labelbottom=(row==2))
-        ax.annotate(rf"$v_E={v_e:g}\,\mathrm{{m/s}}$",xy=(1.03,0.5),xycoords="axes fraction",
+        ax.annotate(rf"$\theta_{{\mathrm{{rel}}}}={angle_label(theta_rel)}\,\mathrm{{rad}}$",xy=(1.03,0.5),xycoords="axes fraction",
                      ha="left",va="center",rotation=90)
         if row==2:
             ax.set_xlabel(r"$x_{\mathrm{rel}}\ [\mathrm{m}]$")
-    panels[0].annotate(
-        rf"$v_H={V_H:g}\,\mathrm{{m/s}}$",
-        xy=(0.5, 1.0),
-        xycoords="axes fraction",
-        xytext=(0, 10),
-        textcoords="offset points",
-        ha="center",
-        va="bottom",
-        fontsize=13,
-    )
     handles=[Line2D([0],[0],color=c,linewidth=CONTOUR_LINEWIDTH,linestyle=s,
                     label=cfg["label"]+" ("+zero_label+")")
              for c,s,cfg in zip(colors,CONTOUR_STYLES,metrics)]
     handles.append(Patch(facecolor=EGO_FACE,edgecolor=EGO_EDGE,linestyle="--",label="Ego vehicle"))
     fig.legend(handles=handles,loc="upper center",bbox_to_anchor=(0.5,0.99),
                ncol=3,frameon=False,handlelength=2.5,columnspacing=2)
-    spatial.text2D(
-        0.5, -0.08,
-        rf"$v_E={V_E_3D:g}\,\mathrm{{m/s}}"
-        rf"\qquad v_H={V_H:g}\,\mathrm{{m/s}}$",
-        transform=spatial.transAxes,
-        ha="center",
-    )
     folder = Path(OUTPUT_DIRECTORY).expanduser()
     if not folder.is_absolute():
         folder = BASE / folder
     folder.mkdir(parents=True, exist_ok=True)
     output = folder / f"{pair[0]}_vs_{pair[1]}_{key.lower()}.{OUTPUT_FORMAT}"
+    finish_figure(fig)
     fig.savefig(output,dpi=DPI,bbox_inches="tight",pad_inches=0.1,
                 bbox_extra_artists=fig.get_default_bbox_extra_artists() + [spatial.zaxis.label])
-    print(f"v_H={V_H:g}; delta_E={DELTA_E:g} rad; theta slice={THETA_SLICE:g} rad")
+    print(f"v_H={V_H:g}; delta_E={DELTA_E:g} rad; theta slices={THETA_SLICES}")
     print(f"Export: {output}\nSmoothing solo grafico: {SMOOTHING_SIGMA:g} celle raffinate.")
     if not SHOW_FIGURE:
         plt.close(fig)

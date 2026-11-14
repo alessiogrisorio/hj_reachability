@@ -1,4 +1,4 @@
-"""Mosaico 3x3 di V0 o BRT: righe v_H, colonne v_E.
+"""Mosaico V0/BRT: colonne v_E, righe theta_rel, delta_E o v_H.
 Dipendenze: numpy, scipy, matplotlib.
 Esecuzione: python plot_terminal_slices.py
 Percorsi relativi riferiti alla cartella dello script; output nella stessa cartella.
@@ -13,6 +13,10 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import gaussian_filter
+try:
+    from .plotting_common import angle_label, format_colorbars
+except ImportError:
+    from plotting_common import angle_label, format_colorbars
 # ---------------- Configurazione ----------------
 METRICS = (
     "euclidean",
@@ -34,6 +38,10 @@ V0_COLOR = "#287a32"
 V0_LINESTYLE = "--"
 V0_LINEWIDTH = 1.4
 V_E_VALUES = (4.0, 6.0, 10.0)  # Colonne, da sinistra a destra
+ROW_PARAMETER = None  # None: default per metrica; oppure theta_rel, delta_E, v_H
+ROW_VALUES = None  # None: valori predefiniti del parametro selezionato
+V_H_FIXED = 6.0
+FONT_SIZE = 16
 V_H_VALUES = (4.0, 6.0, 10.0)  # Righe, dall'alto in basso
 THETA_REL = 0.0  # Radianti
 DELTA_E = 0.0  # Radianti
@@ -115,169 +123,187 @@ def load_data(metric):
     print(f"Input: {path}\nCampo: {FIELD_KEY}; theta_rel={THETA_REL:g}, delta_E={DELTA_E:g} rad")
     return axes, field, terminal, target_time
 
-def make_figure(metric):
-    if len(V_E_VALUES) != 3 or len(V_H_VALUES) != 3:
-        raise ValueError("Specificare tre velocita ego e tre velocita human.")
-    if int(REFINEMENT) != REFINEMENT or REFINEMENT < 1 or SMOOTHING_SIGMA < 0:
-        raise ValueError("REFINEMENT deve essere intero >= 1; SMOOTHING_SIGMA >= 0.")
-    if not np.isfinite(COLORBAR_TICK_STEP) or COLORBAR_TICK_STEP <= 0:
-        raise ValueError("COLORBAR_TICK_STEP deve essere positivo e finito.")
-    if MAX_COLORBAR_TICKS < 3:
-        raise ValueError("MAX_COLORBAR_TICKS deve essere almeno 3.")
-    axes, field, terminal, target_time = load_data(metric)
-    if FIELD_KEY == "BRT":
-        field_label = rf"V({target_time:g},\mathbf{{x}}_R)"
-    elif FIELD_KEY == "V0":
-        field_label = r"V_0(\mathbf{x}_R)"
-    else:
-        field_label = FIELD_KEY.replace("_", r"\_")
+def make_mosaic(
+    metric, key="V0", *, row_parameter=None, row_values=None,
+    v_h=6.0, v_e_values=(4.0, 6.0, 10.0), theta_rel=0.0, delta_e=0.0,
+    data_directory=None, input_file=None, figure_size=(10.2, 5.5),
+    refinement=6, smoothing_sigma=2.0, cmap="RdBu_r", font_size=16,
+    show_v0_contour=True, x_limits=None, y_limits=None,
+):
+    """Restituisce un mosaico; non salva e non modifica i dati o le impostazioni.
+
+    Colonne: v_E. Righe: theta_rel, delta_E oppure v_H.
+    I parametri fissi non sono scritti nella figura. Nei BRT il bordo V0=0
+    viene estratto con gli stessi parametri di ogni singolo pannello.
+    """
+    if row_parameter is None:
+        row_parameter = ("theta_rel" if metric in ("dce", "btn", "stn") else
+                         "delta_E" if metric in ("ttc", "time_eggert") else "v_H")
+    defaults = {
+        "theta_rel": (0.0, np.pi/6, np.pi/3),
+        "delta_E": (-np.pi/12, 0.0, np.pi/12),
+        "v_H": tuple(V_H_VALUES),
+    }
+    if row_parameter not in defaults:
+        raise ValueError("row_parameter: theta_rel, delta_E oppure v_H.")
+    row_values = tuple(defaults[row_parameter] if row_values is None else row_values)
+    v_e_values = tuple(v_e_values)
+    if not row_values or not v_e_values:
+        raise ValueError("Specificare almeno una riga e una colonna.")
+    if refinement < 1 or int(refinement) != refinement or smoothing_sigma < 0:
+        raise ValueError("refinement intero >= 1; smoothing_sigma >= 0.")
+    folder = Path(DATA_DIRECTORY if data_directory is None else data_directory).expanduser()
+    path = Path(input_file).expanduser() if input_file else folder / f"{metric}.npz"
+    if not path.is_absolute():
+        path = BASE / path
+    with np.load(path, allow_pickle=False) as data:
+        axes = [np.asarray(data[name], dtype=float) for name in STATE_NAMES]
+        shape = tuple(len(axis) for axis in axes)
+        for name, axis in zip(STATE_NAMES, axes):
+            if axis.ndim != 1 or not len(axis) or not np.isfinite(axis).all() or np.any(np.diff(axis) <= 0):
+                raise ValueError(f"Asse non valido: {name}")
+        if "state_names" in data and tuple(data["state_names"].tolist()) != STATE_NAMES:
+            raise ValueError("Ordine degli stati incompatibile.")
+        field = data[key]
+        if field.shape != shape:
+            raise ValueError("Forma del campo incompatibile con la griglia.")
+        initial = data["V0"] if key == "BRT" and show_v0_contour else None
+        if initial is not None and initial.shape != shape:
+            raise ValueError("Forma V0 incompatibile con la griglia.")
+        time = float(data["target_time"]) if key == "BRT" else None
+        if time is not None and not np.isfinite(time):
+            raise ValueError("target_time non finito.")
+    field_label = (rf"V({time:g},\mathbf{{x}}_R)" if key == "BRT" else
+                   r"V_0(\mathbf{x}_R)" if key == "V0" else key.replace("_", r"\_"))
     x, y = axes[:2]
     if min(len(x), len(y)) < 2:
-        raise ValueError("Servono almeno due nodi per ciascun asse spaziale.")
-    limits = [X_LIMITS if X_LIMITS is not None else (x[0], x[-1]),
-              Y_LIMITS if Y_LIMITS is not None else (y[0], y[-1])]
-    for name, axis, (lo, hi) in zip(STATE_NAMES[:2], (x, y), limits):
-        if hi <= lo or lo < axis[0] or hi > axis[-1]:
-            raise ValueError(f"Limiti non validi per {name}: {(lo, hi)}")
-    # Raffinamento e filtro sul dominio completo, poi ritaglio: bordi coerenti.
-    xf = np.linspace(x[0], x[-1], (len(x) - 1) * int(REFINEMENT) + 1)
-    yf = np.linspace(y[0], y[-1], (len(y) - 1) * int(REFINEMENT) + 1)
-    xx, yy = np.meshgrid(xf, yf, indexing="ij")
-    points = np.stack((xx, yy), axis=-1)
-    xr = np.unique(np.r_[limits[0][0], xf[(xf > limits[0][0]) & (xf < limits[0][1])], limits[0][1]])
-    yr = np.unique(np.r_[limits[1][0], yf[(yf > limits[1][0]) & (yf < limits[1][1])], limits[1][1]])
-    rx, ry = np.meshgrid(xr, yr, indexing="ij")
-    render_points = np.stack((rx, ry), axis=-1)
-    slices = []
-    terminal_slices = []
-    for row, v_h in enumerate(V_H_VALUES):
-        for column, v_e in enumerate(V_E_VALUES):
-            original = extract_slice(field, axes, v_h, v_e)
-            fine = RegularGridInterpolator((x, y), original)(points)
-            if SMOOTHING_SIGMA:
-                fine = gaussian_filter(fine, sigma=SMOOTHING_SIGMA, mode="nearest")
-            plotted = RegularGridInterpolator((xf, yf), fine)(render_points)
-            slices.append(plotted)
-            if terminal is not None:
-                initial = extract_slice(terminal, axes, v_h, v_e)
-                fine_initial = RegularGridInterpolator((x, y), initial)(points)
-                if SMOOTHING_SIGMA:
-                    fine_initial = gaussian_filter(
-                        fine_initial, sigma=SMOOTHING_SIGMA, mode="nearest"
-                    )
-                terminal_slices.append(
-                    RegularGridInterpolator((xf, yf), fine_initial)(render_points)
-                )
-            print(f"Riga {row+1}, colonna {column+1}: v_H={v_h:g}, v_E={v_e:g}, "
-                  f"range=[{plotted.min():.6g}, {plotted.max():.6g}]")
-    vmin = min(float(s.min()) for s in slices)
-    vmax = max(float(s.max()) for s in slices)
-    if not vmin < vmax:
-        raise ValueError("Le nove fette hanno tutte lo stesso valore: colorbar degenere.")
-    norm = (TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
-            if vmin < 0 < vmax else Normalize(vmin=vmin, vmax=vmax))
-    plt.rcParams.update({"font.family": "serif", "mathtext.fontset": "cm",
-                         "font.size": 13, "axes.labelsize": 14,
-                         "pdf.fonttype": 42, "ps.fonttype": 42})
-    fig, panels = plt.subplots(3, 3, figsize=FIGURE_SIZE, sharex=True, sharey=True)
-    fig.subplots_adjust(left=0.15, right=0.84, bottom=0.10, top=0.86, wspace=0.08, hspace=0.10)
-    handles = [
-        Patch(facecolor="lightcyan", edgecolor="#263746", linewidth=1.4,
-              linestyle="--", label="Ego vehicle"),
-        Line2D([0], [0], color=ZERO_COLOR, linewidth=ZERO_LINEWIDTH,
-               label=rf"${field_label}=0$"),
-    ]
-    if terminal is not None:
-        handles.append(Line2D(
-            [0], [0], color=V0_COLOR, linewidth=V0_LINEWIDTH,
-            linestyle=V0_LINESTYLE, label=r"$V_0(\mathbf{x}_R)=0$"
-        ))
-    fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 1.005),
-               ncol=len(handles), frameon=False, fontsize=13, handlelength=2.5, columnspacing=2.0)
-    for index, (ax, values) in enumerate(zip(panels.flat, slices)):
-        row, column = divmod(index, 3)
-        image = ax.pcolormesh(xr, yr, values.T, shading="gouraud", cmap=COLORMAP,
-                              norm=norm, rasterized=True)
-        if values.min() < 0 < values.max():
-            ax.contour(xr, yr, values.T, levels=[0], colors=ZERO_COLOR,
-                       linewidths=ZERO_LINEWIDTH)
-        else:
-            warnings.warn(f"Nessun attraversamento di zero nella fetta ({row+1}, {column+1}).")
-        if terminal is not None:
-            initial = terminal_slices[index]
-            if initial.min() < 0 < initial.max():
-                ax.contour(
-                    xr, yr, initial.T, levels=[0], colors=V0_COLOR,
-                    linewidths=V0_LINEWIDTH, linestyles=V0_LINESTYLE,
-                    zorder=4,
-                )
-            else:
-                warnings.warn(
-                    f"V0: nessun attraversamento di zero nella fetta ({row+1}, {column+1})."
-                )
-        ego = plt.Rectangle(
-            (-4.68 / 2, -2.20 / 2), 4.68, 2.20,
-            facecolor="lightcyan", edgecolor="#263746",
-            linewidth=1.4, linestyle="--", alpha=1.0, zorder=5,
-        )
-        ax.add_patch(ego)
-        ax.set_xlim(limits[0]); ax.set_ylim(limits[1])
-        ax.set_aspect("equal", adjustable="box")
-        ax.tick_params(labelsize=12, direction="out", length=3)
-        if row == 2:
-            ax.set_xlabel(r"$x_{\mathrm{rel}}\ [\mathrm{m}]$")
-        if column == 0:
-            ax.set_ylabel(r"$y_{\mathrm{rel}}\ [\mathrm{m}]$")
-        if row == 0:
-            ax.annotate(rf"$v_E={V_E_VALUES[column]:g}\,\mathrm{{m/s}}$",
-                        xy=(0.5, 1), xycoords="axes fraction", xytext=(0, 9),
-                        textcoords="offset points", ha="center", va="bottom")
-        if column == 0:
-            ax.annotate(rf"$v_H={V_H_VALUES[row]:g}\,\mathrm{{m/s}}$",
-                        xy=(0, 0.5), xycoords="axes fraction", xytext=(-76, 0),
-                        textcoords="offset points", ha="center", va="center", rotation=90)
-    fig.canvas.draw()
-    bottom = panels[2, 2].get_position().y0
-    top = panels[0, 2].get_position().y1
-    cax = fig.add_axes((0.875, bottom, 0.022, top - bottom))
-    bar = fig.colorbar(image, cax=cax)
-    if vmin < 0 < vmax:
-        negative_ticks = np.linspace(vmin, 0.0, 5)
-        positive_ticks = np.linspace(0.0, vmax, 5)[1:]
-        ticks = np.concatenate((negative_ticks, positive_ticks))
-    else:
-        ticks = np.linspace(vmin, vmax, 7)
+        raise ValueError("Almeno due nodi per ciascun asse spaziale.")
+    limits = [x_limits or (x[0], x[-1]), y_limits or (y[0], y[-1])]
+    for axis, (lo, hi) in zip((x, y), limits):
+        if not axis[0] <= lo < hi <= axis[-1]:
+            raise ValueError("Limiti XY fuori griglia.")
+    xf, yf = [np.linspace(a[0], a[-1], (len(a)-1)*int(refinement)+1) for a in (x, y)]
+    points = np.stack(np.meshgrid(xf, yf, indexing="ij"), axis=-1)
+    xr, yr = [np.unique(np.r_[lo, a[(a > lo) & (a < hi)], hi])
+              for a, (lo, hi) in zip((xf, yf), limits)]
+    crop = np.stack(np.meshgrid(xr, yr, indexing="ij"), axis=-1)
 
-    bar.set_ticks(ticks)
-    bar.set_ticklabels([f"{value:.3g}" for value in ticks])
+    def section(values, parameters):
+        for dim, name in ((5, "v_E"), (4, "delta_E"), (3, "v_H"), (2, "theta_rel")):
+            lo, hi, weight = bracket(axes[dim], parameters[name], name, periodic=(dim == 2))
+            values = (1-weight)*np.take(values, lo, axis=dim) + weight*np.take(values, hi, axis=dim)
+        if not np.isfinite(values).all():
+            raise ValueError("Fetta con NaN o infiniti.")
+        fine = RegularGridInterpolator((x, y), values)(points)
+        if smoothing_sigma:
+            fine = gaussian_filter(fine, smoothing_sigma, mode="nearest")
+        return RegularGridInterpolator((xf, yf), fine)(crop)
+
+    slices, initial_slices = [], []
+    for row_value in row_values:
+        for ve in v_e_values:
+            parameters = dict(v_E=ve, v_H=v_h, theta_rel=theta_rel, delta_E=delta_e)
+            parameters[row_parameter] = row_value
+            slices.append(section(field, parameters))
+            initial_slices.append(section(initial, parameters) if initial is not None else None)
+    vmin = min(float(a.min()) for a in slices)
+    vmax = max(float(a.max()) for a in slices)
+    if not vmin < vmax:
+        raise ValueError("Colorbar degenere.")
+    norm = (TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax) if vmin < 0 < vmax
+            else Normalize(vmin=vmin, vmax=vmax))
+    plt.rcParams.update({"font.family": "serif", "mathtext.fontset": "cm",
+                         "font.size": font_size, "axes.labelsize": font_size,
+                         "xtick.labelsize": font_size-1, "ytick.labelsize": font_size-1,
+                         "legend.fontsize": font_size-1, "pdf.fonttype": 42, "ps.fonttype": 42})
+    nr, nc = len(row_values), len(v_e_values)
+    fig = plt.figure(figsize=figure_size, layout="constrained")
+    grid = fig.add_gridspec(nr+1, nc+2, width_ratios=(0.16, *([1]*nc), 0.045),
+                           height_ratios=(0.25, *([1]*nr)))
+    header = fig.add_subplot(grid[0, :])
+    header.set_axis_off()
+    handles = [Patch(facecolor="lightcyan", edgecolor="#263746", linewidth=1.4,
+                     linestyle="--", label="Ego vehicle"),
+               Line2D([], [], color=ZERO_COLOR, linewidth=ZERO_LINEWIDTH,
+                      label=rf"${field_label}=0$")]
+    if initial is not None:
+        handles.append(Line2D([], [], color=V0_COLOR, linestyle=V0_LINESTYLE,
+                              linewidth=V0_LINEWIDTH, label=r"$V_0(\mathbf{x}_R)=0$"))
+    header.legend(handles=handles, loc="center", ncol=len(handles), frameon=False,
+                  handlelength=2.5, columnspacing=2.0)
+    panels = []
+    for row, value in enumerate(row_values):
+        label_ax = fig.add_subplot(grid[row+1, 0])
+        label_ax.set_axis_off()
+        label = (rf"$v_H={value:g}\,\mathrm{{m/s}}$" if row_parameter == "v_H" else
+                 rf"$\theta_{{\mathrm{{rel}}}}={angle_label(value)}\,\mathrm{{rad}}$"
+                 if row_parameter == "theta_rel" else
+                 rf"$\delta_E={angle_label(value)}\,\mathrm{{rad}}$")
+        label_ax.text(0.5, 0.5, label, rotation=90, ha="center", va="center")
+        for column, ve in enumerate(v_e_values):
+            index = row*nc+column
+            ax = fig.add_subplot(grid[row+1, column+1],
+                                 sharex=panels[0] if panels else None,
+                                 sharey=panels[0] if panels else None)
+            panels.append(ax)
+            values = slices[index]
+            image = ax.pcolormesh(xr, yr, values.T, shading="gouraud", cmap=cmap,
+                                  norm=norm, rasterized=True)
+            for current, color, linewidth, linestyle in (
+                (values, ZERO_COLOR, ZERO_LINEWIDTH, "-"),
+                (initial_slices[index], V0_COLOR, V0_LINEWIDTH, V0_LINESTYLE),
+            ):
+                if current is not None and current.min() < 0 < current.max():
+                    ax.contour(xr, yr, current.T, levels=[0], colors=color,
+                               linewidths=linewidth, linestyles=linestyle, zorder=4)
+            ax.add_patch(plt.Rectangle((-4.68/2, -2.20/2), 4.68, 2.20,
+                                       facecolor="lightcyan", edgecolor="#263746",
+                                       linewidth=1.4, linestyle="--", zorder=5))
+            ax.set(xlim=limits[0], ylim=limits[1])
+            ax.set_aspect("equal", adjustable="box")
+            ax.tick_params(direction="out", length=3, labelleft=column == 0, labelbottom=row == nr-1)
+            if row == nr-1:
+                ax.set_xlabel(r"$x_{\mathrm{rel}}\ [\mathrm{m}]$")
+            if column == 0:
+                ax.set_ylabel(r"$y_{\mathrm{rel}}\ [\mathrm{m}]$")
+            if row == 0:
+                ax.set_title(rf"$v_E={ve:g}\,\mathrm{{m/s}}$", fontsize=font_size, pad=8)
+    cax = fig.add_subplot(grid[1:, -1])
+    bar = fig.colorbar(image, cax=cax)
+    ticks = (np.r_[np.linspace(vmin, 0, 5), np.linspace(0, vmax, 5)[1:]]
+             if vmin < 0 < vmax else np.linspace(vmin, vmax, 7))
+    bar.set_ticks(ticks, labels=[f"{t:.2f}" for t in ticks])
     bar.set_label(rf"${field_label}$", labelpad=9)
-    bar.ax.tick_params(labelsize=12)
+    format_colorbars(fig)
+    return fig
+
+
+def make_figure(metric):
+    fig = make_mosaic(
+        metric, FIELD_KEY, row_parameter=ROW_PARAMETER, row_values=ROW_VALUES,
+        v_h=V_H_FIXED, v_e_values=V_E_VALUES, theta_rel=THETA_REL, delta_e=DELTA_E,
+        input_file=INPUT_FILE, figure_size=FIGURE_SIZE, refinement=REFINEMENT,
+        smoothing_sigma=SMOOTHING_SIGMA, cmap=COLORMAP, font_size=FONT_SIZE,
+        show_v0_contour=SHOW_V0_CONTOUR, x_limits=X_LIMITS, y_limits=Y_LIMITS,
+    )
     folder = Path(OUTPUT_DIRECTORY).expanduser()
     if not folder.is_absolute():
         folder = BASE / folder
     folder.mkdir(parents=True, exist_ok=True)
     output = folder / f"{metric}_{FIELD_KEY.lower()}_slices.pdf"
     fig.savefig(output, dpi=DPI, bbox_inches="tight", pad_inches=0.08)
-    print(f"Colorbar comune: [{vmin:.6g}, {vmax:.6g}]\nExport: {output}")
-    print(f"Smoothing solo grafico: sigma={SMOOTHING_SIGMA:g} celle raffinate.")
     if not SHOW_FIGURE:
         plt.close(fig)
+    print(f"Export: {output}")
     return output
-
 
 
 def main():
     if isinstance(METRICS, str) or not METRICS:
-        raise ValueError('METRICS deve essere una lista o tupla, es.: ("euclidean",).')
-    if len(set(METRICS)) != len(METRICS):
-        raise ValueError("METRICS contiene nomi duplicati.")
+        raise ValueError("METRICS deve essere una sequenza non vuota.")
     if INPUT_FILE is not None and len(METRICS) != 1:
-        raise ValueError("INPUT_FILE puo essere usato solo con una singola metrica.")
-    outputs = []
-    for index, metric in enumerate(METRICS, start=1):
-        print(f"\n[{index}/{len(METRICS)}] {metric} - {FIELD_KEY}", flush=True)
-        outputs.append(make_figure(metric))
-    print(f"\nGenerati {len(outputs)} PDF.")
+        raise ValueError("INPUT_FILE richiede una sola metrica.")
+    outputs = [make_figure(metric) for metric in METRICS]
     if SHOW_FIGURE:
         plt.show()
     return outputs
