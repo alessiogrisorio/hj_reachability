@@ -25,8 +25,8 @@ PAIRS = (
     #("euclidean", "dce"),
     #("btn", "stn"),
     #("euclidean", "long_lat"),
-    ("ttc", "time_eggert"),
-    #("rss", "eggert"),
+    #("ttc", "time_eggert"),
+    ("rss", "eggert"),
     #("btn", "long_lat"),
     #("stn", "long_lat")
 )
@@ -34,7 +34,7 @@ LABELS = {
     "euclidean": "Euclidean", "dce": "DCE",
     "btn": "BTN", "stn": "STN", "long_lat": "min(BTN,STN)",
     "ttc": "TTC", "time_eggert": "TBR",
-    "rss": "RSS", "eggert": "Eggert",
+    "rss": "RSS", "eggert": "PRM",
 }
 OUTPUT_DIRECTORY = Path(".")  # Relativa alla cartella dello script.
 OUTPUT_FORMAT = "pdf"

@@ -134,6 +134,10 @@ def configure_axis(ax, limits):
         axis.pane.set_edgecolor("white")
         axis._axinfo["grid"]["color"] = (0.78, 0.78, 0.78, 1)
         axis._axinfo["grid"]["linewidth"] = 0.5
+    ax.figure.canvas.draw()
+    angle = ax.zaxis.label.get_rotation()
+    ax.zaxis.set_rotate_label(False)
+    ax.zaxis.label.set_rotation((angle + 180) % 360)
 
 def make_figure(metric):
     axes, field, label = load_slice(metric)

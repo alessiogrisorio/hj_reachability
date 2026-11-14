@@ -23,9 +23,9 @@ METRICS = (
     {"file": "stn.npz", "label": "STN"},
     {"file": "long_lat.npz", "label": "min(BTN,STN)"},
     {"file": "ttc.npz", "label": "TTC"},
-    {"file": "time_eggert.npz", "label": "Time Eggert"},
+    {"file": "time_eggert.npz", "label": "TBR"},
     {"file": "rss.npz", "label": "RSS"},
-    {"file": "eggert.npz", "label": "Eggert"},
+    {"file": "eggert.npz", "label": "PRM"},
 )
 FIELD_KEY = "BRT"  # "V0": terminal set; "BRT": insieme dopo propagazione HJ
 OUTPUT_FILE = "brt_iou.pdf"  # Anche .png, .svg, ecc.
