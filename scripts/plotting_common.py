@@ -68,4 +68,6 @@ def finish_figure(fig):
         colorbar = getattr(ax, "_colorbar", None)
         if colorbar is not None and colorbar.orientation == "vertical":
             ax.yaxis.label.set_rotation(270)
+            ax.yaxis.label.set_verticalalignment("top")
+            ax.yaxis.label.set_horizontalalignment("center")
     return fig
