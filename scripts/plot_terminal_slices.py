@@ -218,8 +218,8 @@ def make_mosaic(
                          "legend.fontsize": font_size-1, "pdf.fonttype": 42, "ps.fonttype": 42})
     nr, nc = len(row_values), len(v_e_values)
     fig = plt.figure(figsize=figure_size, layout="constrained")
-    grid = fig.add_gridspec(nr+1, nc+2, width_ratios=(0.16, *([1]*nc), 0.045),
-                           height_ratios=(0.25, *([1]*nr)))
+    grid = fig.add_gridspec(nr+1, nc+1, width_ratios=(*([1] * nc), 0.045),
+                           height_ratios=(0.20, *([1] * nr)))
     header = fig.add_subplot(grid[0, :])
     header.set_axis_off()
     handles = [Patch(facecolor="lightcyan", edgecolor="#263746", linewidth=1.4,
@@ -233,16 +233,13 @@ def make_mosaic(
                   handlelength=2.5, columnspacing=2.0)
     panels = []
     for row, value in enumerate(row_values):
-        label_ax = fig.add_subplot(grid[row+1, 0])
-        label_ax.set_axis_off()
         label = (rf"$v_H={value:g}\,\mathrm{{m/s}}$" if row_parameter == "v_H" else
                  rf"$\theta_{{\mathrm{{rel}}}}={angle_label(value)}\,\mathrm{{rad}}$"
                  if row_parameter == "theta_rel" else
                  rf"$\delta_E={angle_label(value)}\,\mathrm{{rad}}$")
-        label_ax.text(0.5, 0.5, label, rotation=90, ha="center", va="center")
         for column, ve in enumerate(v_e_values):
             index = row*nc+column
-            ax = fig.add_subplot(grid[row+1, column+1],
+            ax = fig.add_subplot(grid[row+1, column],
                                  sharex=panels[0] if panels else None,
                                  sharey=panels[0] if panels else None)
             panels.append(ax)
@@ -265,9 +262,9 @@ def make_mosaic(
             if row == nr-1:
                 ax.set_xlabel(r"$x_{\mathrm{rel}}\ [\mathrm{m}]$")
             if column == 0:
-                ax.set_ylabel(r"$y_{\mathrm{rel}}\ [\mathrm{m}]$")
+                ax.set_ylabel(label + "\n" + r"$y_{\mathrm{rel}}\ [\mathrm{m}]$")
             if row == 0:
-                ax.set_title(rf"$v_E={ve:g}\,\mathrm{{m/s}}$", fontsize=font_size, pad=8)
+                ax.set_title(rf"$v_E={ve:g}\,\mathrm{{m/s}}$", fontsize=font_size+1, pad=10)
     cax = fig.add_subplot(grid[1:, -1])
     bar = fig.colorbar(image, cax=cax)
     ticks = (np.r_[np.linspace(vmin, 0, 5), np.linspace(0, vmax, 5)[1:]]

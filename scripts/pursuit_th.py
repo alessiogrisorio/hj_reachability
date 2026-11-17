@@ -384,7 +384,7 @@ def plot_trajectory(result, metric, folder):
     ax.set_xlim(spatial_limits(result)[0]); ax.set_ylim(spatial_limits(result)[1])
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True, alpha=0.18)
-    ax.legend(handles=handles, loc="best")
+    ax.legend(handles=handles, loc="upper right", bbox_to_anchor=(1.0, 1.05))
     bar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=TIME_COLORMAP), cax=cax)
     cax.set_title("t", pad=10)
     bar.set_label("[s]")

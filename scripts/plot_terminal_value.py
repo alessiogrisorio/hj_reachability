@@ -134,6 +134,7 @@ def configure_axis(ax, limits):
     ax.view_init(elev=ELEVATION, azim=AZIMUTH)
     ax.set_box_aspect((1.1, 1, 1))
     ax.tick_params(labelsize=9, pad=1)
+    ax.tick_params(axis="z", pad=5)
     for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
         axis.pane.fill = False
         axis.pane.set_edgecolor("white")
